@@ -182,6 +182,10 @@ def _build_tenure_summary_table(sl: pd.DataFrame, metrics: list[str], suffix: st
 
 def run_analysis(summary_df, student_info_df, formula, selected_exam_types, selected_months, include_na):
     """Run TPI + cohort + all statistical analyses. Returns dict of results."""
+    selected_months_int = sorted(int(m) for m in selected_months)
+    first_month = min(selected_months_int)
+    last_month = max(selected_months_int)
+
     # Filter summary by selected conditions
     view = summary_df[
         summary_df["시험유형"].isin(selected_exam_types) & summary_df["월"].isin(selected_months)
@@ -202,7 +206,7 @@ def run_analysis(summary_df, student_info_df, formula, selected_exam_types, sele
     if cohort_df.empty:
         return {"error": cohort_meta.get("error", "코호트 추출 실패")}
 
-    student_level = build_cohort_student_level(cohort_df, student_info_df)
+    student_level = build_cohort_student_level(cohort_df, student_info_df, selected_months_int)
     if student_level.empty:
         return {"error": "학생 수준 데이터 생성 실패"}
 
@@ -233,43 +237,64 @@ def run_analysis(summary_df, student_info_df, formula, selected_exam_types, sele
         cohort_meta["churn_rate"] = float(student_level["target_churn_sep"].mean() * 100) if len(student_level) > 0 else 0
 
     base_metrics = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR", "TPI"]
-    aug_metrics = [f"{m}_8월" for m in base_metrics]
-    mar_metrics = [f"{m}_3월" for m in base_metrics]
     delta_metrics = [f"{m}_변화량" for m in base_metrics]
 
-    comp_aug = build_comparison_table(student_level, base_metrics, "_8월")
-    comp_mar = build_comparison_table(student_level, base_metrics, "_3월")
-    comp_delta = build_comparison_table(student_level, base_metrics, "_변화량")
-    pb_aug = point_biserial_table(student_level, aug_metrics)
-    pb_mar = point_biserial_table(student_level, mar_metrics)
-    pb_delta = point_biserial_table(student_level, delta_metrics)
+    # Per-month comparison, pb, uni tables
+    comp_by_month = {}
+    pb_by_month = {}
+    uni_by_month = {}
+    for mo in selected_months_int:
+        suffix = f"_{mo}월"
+        month_metrics = [f"{bm}{suffix}" for bm in base_metrics]
+        comp_by_month[mo] = build_comparison_table(student_level, base_metrics, suffix)
+        pb_by_month[mo] = point_biserial_table(student_level, month_metrics)
+        uni_by_month[mo] = univariate_logistic_table(student_level, month_metrics)
 
+    # Delta (first→last) comparison
+    comp_delta = build_comparison_table(student_level, base_metrics, "_변화량")
+    pb_delta = point_biserial_table(student_level, delta_metrics)
+    uni_delta = univariate_logistic_table(student_level, delta_metrics)
+
+    # Crosstabs for last month
     crosstabs = {}
-    for m in base_metrics:
-        col = f"{m}_8월"
+    for bm in base_metrics:
+        col = f"{bm}_{last_month}월"
         if col in student_level.columns:
             ct = quantile_tenure_crosstab(student_level, col)
             if not ct.empty:
-                crosstabs[m] = ct
+                crosstabs[bm] = ct
 
-    uni_aug = univariate_logistic_table(student_level, aug_metrics)
-    uni_mar = univariate_logistic_table(student_level, mar_metrics)
-    uni_delta = univariate_logistic_table(student_level, delta_metrics)
-    multi_models = run_all_multivariate_models(student_level)
-    corr_m = correlation_matrix(student_level, aug_metrics)
-    corr_p = correlation_pairs_table(student_level, aug_metrics)
-    pb_all = point_biserial_table(student_level, aug_metrics + mar_metrics + delta_metrics)
-    survival = run_survival_analysis(student_level)
-    risk_df = compute_risk_scores(student_level)
+    # Multivariate models (with dynamic month)
+    multi_models = run_all_multivariate_models(student_level, last_month=last_month, first_month=first_month)
+
+    # Correlation (last month)
+    last_metrics = [f"{bm}_{last_month}월" for bm in base_metrics]
+    corr_m = correlation_matrix(student_level, last_metrics)
+    corr_p = correlation_pairs_table(student_level, last_metrics)
+
+    # PB all (all months + delta)
+    all_pb_metrics = []
+    for mo in selected_months_int:
+        all_pb_metrics.extend([f"{bm}_{mo}월" for bm in base_metrics])
+    all_pb_metrics.extend(delta_metrics)
+    pb_all = point_biserial_table(student_level, all_pb_metrics)
+
+    survival = run_survival_analysis(student_level, last_month=last_month)
+    risk_df = compute_risk_scores(student_level, last_month=last_month, first_month=first_month)
 
     monthly_flows = {}
-    for m in base_metrics:
-        mf = build_monthly_flow(cohort_df, m)
+    for bm in base_metrics:
+        mf = build_monthly_flow(cohort_df, bm, selected_months=selected_months_int)
         if not mf.empty:
-            monthly_flows[m] = mf
+            monthly_flows[bm] = mf
 
-    campus_df = campus_summary(risk_df)
-    integrated = build_integrated_summary(pb_aug, uni_aug, multi_models, comp_aug)
+    campus_df = campus_summary(risk_df, last_month=last_month)
+    integrated = build_integrated_summary(
+        pb_by_month.get(last_month, pd.DataFrame()),
+        uni_by_month.get(last_month, pd.DataFrame()),
+        multi_models,
+        comp_by_month.get(last_month, pd.DataFrame()),
+    )
 
     # TPI matrix (for display in TPI tab)
     tpi_df_view = apply_tpi_formula(
@@ -282,10 +307,13 @@ def run_analysis(summary_df, student_info_df, formula, selected_exam_types, sele
         "cohort_meta": cohort_meta,
         "cohort_df": cohort_df,
         "student_level": student_level,
-        "comp_aug": comp_aug, "comp_mar": comp_mar, "comp_delta": comp_delta,
-        "pb_aug": pb_aug, "pb_mar": pb_mar, "pb_delta": pb_delta, "pb_all": pb_all,
+        "selected_months": selected_months_int,
+        "first_month": first_month,
+        "last_month": last_month,
+        "comp_by_month": comp_by_month, "comp_delta": comp_delta,
+        "pb_by_month": pb_by_month, "pb_delta": pb_delta, "pb_all": pb_all,
+        "uni_by_month": uni_by_month, "uni_delta": uni_delta,
         "crosstabs": crosstabs,
-        "uni_aug": uni_aug, "uni_mar": uni_mar, "uni_delta": uni_delta,
         "multi_models": multi_models,
         "corr_matrix": corr_m, "corr_pairs": corr_p,
         "survival": survival,
@@ -432,8 +460,17 @@ all_exam_types = sorted(summary_df["시험유형"].dropna().unique().tolist())
 all_month_opts = sorted(summary_df["월"].dropna().astype(int).unique().tolist())
 campus_opts = sorted(summary_df["캠퍼스"].dropna().unique().tolist()) if "캠퍼스" in summary_df.columns else []
 
+# ── Filter controls (modern card container) ──
 st.markdown('<div class="filter-container">', unsafe_allow_html=True)
 st.markdown('<div class="filter-header">🔍 분석 조건</div>', unsafe_allow_html=True)
+
+# Initialize session state defaults for "전체" toggles
+if "et_all_state" not in st.session_state:
+    st.session_state.et_all_state = True
+if "m_all_state" not in st.session_state:
+    st.session_state.m_all_state = True
+if "c_all_state" not in st.session_state:
+    st.session_state.c_all_state = True
 
 fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1])
 with fc1:
@@ -441,57 +478,50 @@ with fc1:
     with lc1:
         st.markdown('<div class="filter-label">📋 시험유형</div>', unsafe_allow_html=True)
     with lc2:
-        _et_key = "filter_exam_type"
-        _et_toggle = st.checkbox("전체", value=True, key="et_all", label_visibility="visible")
-    if _et_toggle:
-        selected_exam_types = st.multiselect(
-            "시험유형", options=all_exam_types, default=all_exam_types,
-            key=_et_key, label_visibility="collapsed",
-        )
-    else:
-        selected_exam_types = st.multiselect(
-            "시험유형", options=all_exam_types, default=[],
-            key=_et_key, label_visibility="collapsed",
-        )
+        _et_toggle = st.checkbox("전체", value=st.session_state.et_all_state, key="et_all_chk")
+    st.session_state.et_all_state = _et_toggle
+    _et_default = all_exam_types if _et_toggle else (st.session_state.get("_prev_et_sel") or [])
+    selected_exam_types = st.multiselect(
+        "시험유형", options=all_exam_types, default=_et_default,
+        key="filter_exam_type", label_visibility="collapsed",
+    )
+    st.session_state["_prev_et_sel"] = selected_exam_types
 
 with fc2:
     lc1, lc2 = st.columns([3, 1])
     with lc1:
         st.markdown('<div class="filter-label">📅 월</div>', unsafe_allow_html=True)
     with lc2:
-        _m_toggle = st.checkbox("전체", value=True, key="m_all", label_visibility="visible")
+        _m_toggle = st.checkbox("전체", value=st.session_state.m_all_state, key="m_all_chk")
+    st.session_state.m_all_state = _m_toggle
     month_opts = sorted(
         summary_df.loc[summary_df["시험유형"].isin(selected_exam_types), "월"]
         .dropna().astype(int).unique().tolist()
     )
-    if _m_toggle:
-        selected_months = st.multiselect(
-            "월", options=month_opts, default=month_opts,
-            key="filter_month", label_visibility="collapsed",
-        )
-    else:
-        selected_months = st.multiselect(
-            "월", options=month_opts, default=[],
-            key="filter_month", label_visibility="collapsed",
-        )
+    _m_default = month_opts if _m_toggle else (st.session_state.get("_prev_m_sel") or [])
+    # Ensure defaults are within current options
+    _m_default = [m for m in _m_default if m in month_opts]
+    selected_months = st.multiselect(
+        "월", options=month_opts, default=_m_default,
+        key="filter_month", label_visibility="collapsed",
+    )
+    st.session_state["_prev_m_sel"] = selected_months
 
 with fc3:
     lc1, lc2 = st.columns([3, 1])
     with lc1:
         st.markdown('<div class="filter-label">🏫 캠퍼스</div>', unsafe_allow_html=True)
     with lc2:
-        _c_toggle = st.checkbox("전체", value=True, key="c_all", label_visibility="visible")
+        _c_toggle = st.checkbox("전체", value=st.session_state.c_all_state, key="c_all_chk")
+    st.session_state.c_all_state = _c_toggle
     if campus_opts:
-        if _c_toggle:
-            selected_campuses = st.multiselect(
-                "캠퍼스", options=campus_opts, default=campus_opts,
-                key="filter_campus", label_visibility="collapsed",
-            )
-        else:
-            selected_campuses = st.multiselect(
-                "캠퍼스", options=campus_opts, default=[],
-                key="filter_campus", label_visibility="collapsed",
-            )
+        _c_default = campus_opts if _c_toggle else (st.session_state.get("_prev_c_sel") or [])
+        _c_default = [c for c in _c_default if c in campus_opts]
+        selected_campuses = st.multiselect(
+            "캠퍼스", options=campus_opts, default=_c_default,
+            key="filter_campus", label_visibility="collapsed",
+        )
+        st.session_state["_prev_c_sel"] = selected_campuses
     else:
         selected_campuses = []
 
@@ -509,8 +539,6 @@ if set(selected_exam_types) != set(all_exam_types):
     _parts.append(" · ".join(selected_exam_types))
 if set(selected_months) != set(all_month_opts):
     _parts.append(" · ".join(f"{m}월" for m in selected_months))
-else:
-    pass  # all months selected — omit
 if campus_opts and set(selected_campuses) != set(campus_opts):
     _parts.append(f"캠퍼스 {len(selected_campuses)}개 선택")
 if selected_students:
@@ -697,79 +725,64 @@ with tab4:
         meta = ar["cohort_meta"]
         sl = ar["student_level"]
         cohort_df = ar["cohort_df"]
-
-        ANALYSIS_TABS = [
-            "1. TPI 지수 구성",
-            "2. 종합 요약",
-            "3. 재원 vs 퇴원 비교",
-            "4. 지표별 퇴원 연결",
-            "5. TPI 심층 분석",
-            "6. 월별 흐름",
-            "7. 위험 신호 탐지",
-            "8. 캠퍼스/시험유형",
-            "9. 상관분석",
-            "10. 회귀분석",
-            "11. 생존분석",
-            "12. 통합 통계",
-            "13. 다운로드",
-        ]
-        atabs = st.tabs(ANALYSIS_TABS)
+        _sel_months = ar.get("selected_months", [3, 8])
+        _first_m = ar.get("first_month", min(_sel_months))
+        _last_m = ar.get("last_month", max(_sel_months))
+        _tpi_last_col = f"TPI_{_last_m}월"
+        _tpi_first_col = f"TPI_{_first_m}월"
 
         _formula = st.session_state.formula_used or ""
         _s_etypes = st.session_state.stat_exam_types or []
         _s_months = st.session_state.stat_months or []
         _inc_na = st.session_state.include_na_students
 
-        # ─── TAB 1: TPI 지수 구성 ────────────────────────────────────────
+        # Pre-compute config_df for download and TPI 지수 구성 tabs
+        ew = st.session_state.enabled_weights_used
+        _direction_map = {
+            "P": "높을수록 좋음", "T": "높을수록 좋음", "BCV": "높을수록 좋음 (역방향 보정됨)",
+            "CI": "높을수록 좋음", "QR": "높을수록 좋음", "CT": "높을수록 좋음",
+            "CCV": "높을수록 좋음 (역방향 보정됨)", "CQR": "높을수록 좋음", "CV": "높을수록 좋음 (역방향 보정됨)",
+        }
+        _norm_map = {
+            "P": "0~100 clip", "T": "Z-score→T-score 0~100", "BCV": "100 - raw_CV, 0~100 clip",
+            "CI": "난이도 가중 0~100", "QR": "백분위 0~100", "CT": "캠퍼스 내 T-score 0~100",
+            "CCV": "캠퍼스 내 100-rawCV", "CQR": "캠퍼스 내 백분위 0~100", "CV": "100 - raw_CV 0~100",
+        }
+        _all_aliases = ["P", "T", "BCV", "CI", "QR", "CT", "CCV", "CQR", "CV"]
+        _config_rows = []
+        for alias in _all_aliases:
+            if ew is not None:
+                included = ew.get(alias, 0) > 0
+                weight = ew.get(alias, 0)
+            else:
+                included = alias in (_formula or "")
+                weight = "-"
+            _config_rows.append({
+                "지표": alias, "실제컬럼": ALIAS_TO_COLUMN.get(alias, alias),
+                "포함여부": "포함" if included else "제외", "가중치": weight,
+                "방향성": _direction_map.get(alias, ""), "정규화방식": _norm_map.get(alias, ""),
+            })
+        config_df = pd.DataFrame(_config_rows)
+
+        ANALYSIS_TABS = [
+            "1. 종합 요약",
+            "2. 재원 vs 퇴원 비교",
+            "3. 지표별 퇴원 연결",
+            "4. TPI 심층 분석",
+            "5. 월별 흐름",
+            "6. 위험 신호 탐지",
+            "7. 캠퍼스/시험유형",
+            "8. 상관분석",
+            "9. 회귀분석",
+            "10. 생존분석",
+            "11. 통합 통계",
+            "12. 다운로드",
+            "13. TPI 지수 구성",
+        ]
+        atabs = st.tabs(ANALYSIS_TABS)
+
+        # ─── TAB 1: 종합 요약 ────────────────────────────────────────────
         with atabs[0]:
-            _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
-            st.subheader("TPI 지수 구성 정의")
-            st.markdown(f"**현재 적용된 TPI 수식:** `{_formula}`")
-
-            ew = st.session_state.enabled_weights_used
-            direction_map = {
-                "P": "높을수록 좋음", "T": "높을수록 좋음", "BCV": "높을수록 좋음 (역방향 보정됨)",
-                "CI": "높을수록 좋음", "QR": "높을수록 좋음", "CT": "높을수록 좋음",
-                "CCV": "높을수록 좋음 (역방향 보정됨)", "CQR": "높을수록 좋음", "CV": "높을수록 좋음 (역방향 보정됨)",
-            }
-            norm_map = {
-                "P": "0~100 clip", "T": "Z-score→T-score 0~100", "BCV": "100 - raw_CV, 0~100 clip",
-                "CI": "난이도 가중 0~100", "QR": "백분위 0~100", "CT": "캠퍼스 내 T-score 0~100",
-                "CCV": "캠퍼스 내 100-rawCV", "CQR": "캠퍼스 내 백분위 0~100", "CV": "100 - raw_CV 0~100",
-            }
-            config_rows = []
-            all_aliases = ["P", "T", "BCV", "CI", "QR", "CT", "CCV", "CQR", "CV"]
-            for alias in all_aliases:
-                if ew is not None:
-                    included = ew.get(alias, 0) > 0
-                    weight = ew.get(alias, 0)
-                else:
-                    included = alias in (_formula or "")
-                    weight = "-"
-                config_rows.append({
-                    "지표": alias, "실제컬럼": ALIAS_TO_COLUMN.get(alias, alias),
-                    "포함여부": "포함" if included else "제외", "가중치": weight,
-                    "방향성": direction_map.get(alias, ""), "정규화방식": norm_map.get(alias, ""),
-                })
-            config_df = pd.DataFrame(config_rows)
-            st.dataframe(config_df, use_container_width=True, hide_index=True)
-
-            if ew:
-                total_w = sum(v for v in ew.values() if v > 0)
-                st.markdown(f"**가중치 합계:** {total_w}")
-
-            st.markdown("---")
-            st.markdown("**분석 코호트 정의:**")
-            st.markdown(f"- 코호트 규모: {meta['cohort_size']}명 (유지: {meta['retained_count']}명, 퇴원: {meta['churned_count']}명)")
-            if meta.get("na_excluded"):
-                st.markdown(f"- N/A 제외 학생: {meta['na_excluded']}명")
-
-            st.markdown("**재원기간 구간 정의:**")
-            for label in TENURE_LABELS_INTERNAL:
-                st.markdown(f"- {label}")
-
-        # ─── TAB 2: 종합 요약 ────────────────────────────────────────────
-        with atabs[1]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("종합 요약")
 
@@ -785,11 +798,11 @@ with tab4:
 
             st.markdown("")
             k5, k6, k7 = st.columns(3)
-            avg_tpi = sl["TPI_8월"].mean() if "TPI_8월" in sl.columns else np.nan
-            churned_tpi = sl.loc[sl["target_churn_sep"] == 1, "TPI_8월"].mean() if "TPI_8월" in sl.columns else np.nan
-            retained_tpi = sl.loc[sl["target_churn_sep"] == 0, "TPI_8월"].mean() if "TPI_8월" in sl.columns else np.nan
+            avg_tpi = sl[_tpi_last_col].mean() if _tpi_last_col in sl.columns else np.nan
+            churned_tpi = sl.loc[sl["target_churn_sep"] == 1, _tpi_last_col].mean() if _tpi_last_col in sl.columns else np.nan
+            retained_tpi = sl.loc[sl["target_churn_sep"] == 0, _tpi_last_col].mean() if _tpi_last_col in sl.columns else np.nan
             with k5:
-                st.markdown(kpi_card_html("평균 TPI (8월)", f"{avg_tpi:.1f}" if pd.notna(avg_tpi) else "N/A"), unsafe_allow_html=True)
+                st.markdown(kpi_card_html(f"평균 TPI ({_last_m}월)", f"{avg_tpi:.1f}" if pd.notna(avg_tpi) else "N/A"), unsafe_allow_html=True)
             with k6:
                 st.markdown(kpi_card_html("퇴원군 평균 TPI", f"{churned_tpi:.1f}" if pd.notna(churned_tpi) else "N/A", "yellow"), unsafe_allow_html=True)
             with k7:
@@ -804,7 +817,7 @@ with tab4:
                 n = len(sub)
                 churned = int(sub["target_churn_sep"].sum()) if n > 0 else 0
                 rate = round(churned / n * 100, 1) if n > 0 else 0
-                avg = sub["TPI_8월"].mean() if "TPI_8월" in sub.columns and n > 0 else np.nan
+                avg = sub[_tpi_last_col].mean() if _tpi_last_col in sub.columns and n > 0 else np.nan
                 tenure_rows.append({"구간": label, "학생수": n, "퇴원수": churned, "퇴원율(%)": rate, "평균TPI": round(avg, 2) if pd.notna(avg) else "N/A"})
             st.dataframe(pd.DataFrame(tenure_rows), use_container_width=True, hide_index=True)
 
@@ -818,72 +831,86 @@ with tab4:
                 fig.update_layout(title="9월 재원/퇴원 비율", **PLOTLY_LAYOUT)
                 st.plotly_chart(fig, use_container_width=True)
             with dc2:
-                if not ar["comp_aug"].empty:
-                    comp = ar["comp_aug"]
+                comp_last = ar["comp_by_month"].get(_last_m, pd.DataFrame())
+                if not comp_last.empty:
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name="유지군", x=comp["지표"], y=comp["유지군_평균"], marker_color=RETAINED_COLOR))
-                    fig.add_trace(go.Bar(name="퇴원군", x=comp["지표"], y=comp["퇴원군_평균"], marker_color=CHURNED_COLOR))
-                    fig.update_layout(barmode="group", title="유지군 vs 퇴원군 (8월)", **PLOTLY_LAYOUT)
+                    fig.add_trace(go.Bar(name="유지군", x=comp_last["지표"], y=comp_last["유지군_평균"], marker_color=RETAINED_COLOR))
+                    fig.add_trace(go.Bar(name="퇴원군", x=comp_last["지표"], y=comp_last["퇴원군_평균"], marker_color=CHURNED_COLOR))
+                    fig.update_layout(barmode="group", title=f"유지군 vs 퇴원군 ({_last_m}월)", **PLOTLY_LAYOUT)
                     st.plotly_chart(fig, use_container_width=True)
 
-        # ─── TAB 3: 재원 vs 퇴원 비교 ────────────────────────────────────
-        with atabs[2]:
+        # ─── TAB 2: 재원 vs 퇴원 비교 ────────────────────────────────────
+        with atabs[1]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("재원 vs 9월 퇴원 비교")
             st.caption(f"코호트 n={meta['cohort_size']} | 유지군 n={meta['retained_count']} | 퇴원군 n={meta['churned_count']}")
 
-            for label, comp_df in [("8월 값 비교", ar["comp_aug"]), ("3월 값 비교", ar["comp_mar"]), ("3→8 변화량 비교", ar["comp_delta"])]:
-                st.markdown(f"**{label}**")
+            # Show per-month comparisons
+            for mo in _sel_months:
+                comp_df = ar["comp_by_month"].get(mo, pd.DataFrame())
+                st.markdown(f"**{mo}월 값 비교**")
                 if comp_df is not None and not comp_df.empty:
                     st.dataframe(comp_df, use_container_width=True, hide_index=True)
                 else:
-                    safe_warn(f"{label} 데이터가 없습니다.")
+                    safe_warn(f"{mo}월 비교 데이터가 없습니다.")
 
-            # Tenure breakdown table (8월)
+            # Delta
+            st.markdown(f"**{_first_m}→{_last_m} 변화량 비교**")
+            comp_delta = ar.get("comp_delta", pd.DataFrame())
+            if comp_delta is not None and not comp_delta.empty:
+                st.dataframe(comp_delta, use_container_width=True, hide_index=True)
+            else:
+                safe_warn("변화량 비교 데이터가 없습니다.")
+
+            # Tenure breakdown table (last month)
             st.markdown("---")
-            st.markdown("**재원기간 구간별 8월 지표 평균**")
-            tb = _build_tenure_summary_table(sl, ["P-Score", "T-Score", "B.CV", "CI", "QR", "TPI"], "_8월")
+            st.markdown(f"**재원기간 구간별 {_last_m}월 지표 평균**")
+            tb = _build_tenure_summary_table(sl, ["P-Score", "T-Score", "B.CV", "CI", "QR", "TPI"], f"_{_last_m}월")
             if not tb.empty:
                 st.dataframe(tb, use_container_width=True, hide_index=True)
 
             # Box plot
-            if "TPI_8월" in sl.columns:
+            if _tpi_last_col in sl.columns:
                 sl_plot = sl.copy()
                 sl_plot["그룹"] = sl_plot["target_churn_sep"].map({0: "유지", 1: "퇴원"})
-                fig = px.box(sl_plot, x="그룹", y="TPI_8월", color="그룹",
+                fig = px.box(sl_plot, x="그룹", y=_tpi_last_col, color="그룹",
                              color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR})
-                fig.update_layout(title="유지군 vs 퇴원군 TPI 분포 (8월)", **PLOTLY_LAYOUT)
+                fig.update_layout(title=f"유지군 vs 퇴원군 TPI 분포 ({_last_m}월)", **PLOTLY_LAYOUT)
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Effect size
-            if not ar["comp_aug"].empty and "효과크기_d" in ar["comp_aug"].columns:
-                st.markdown("**효과크기 (8월)**")
-                comp = ar["comp_aug"]
-                fig = px.bar(comp, x="지표", y="효과크기_d", color="효과크기_d",
+            # Effect size (last month)
+            comp_last = ar["comp_by_month"].get(_last_m, pd.DataFrame())
+            if not comp_last.empty and "효과크기_d" in comp_last.columns:
+                st.markdown(f"**효과크기 ({_last_m}월)**")
+                fig = px.bar(comp_last, x="지표", y="효과크기_d", color="효과크기_d",
                              color_continuous_scale=["#2196F3", "#FFC107", "#F44336"], title="Cohen's d")
                 fig.update_layout(**PLOTLY_LAYOUT)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ─── TAB 4: 지표별 퇴원 연결 분석 ────────────────────────────────
-        with atabs[3]:
+        # ─── TAB 3: 지표별 퇴원 연결 분석 ────────────────────────────────
+        with atabs[2]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("지표별 퇴원 연결 분석")
 
             base_metrics = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR", "TPI"]
 
-            st.markdown("**단변량 로지스틱 회귀 (8월)**")
-            if ar["uni_aug"] is not None and not ar["uni_aug"].empty:
-                st.dataframe(ar["uni_aug"], use_container_width=True, hide_index=True)
-            else:
-                safe_warn("데이터가 없습니다.")
+            # Per-month uni + pb
+            for mo in _sel_months:
+                st.markdown(f"**단변량 로지스틱 회귀 ({mo}월)**")
+                uni_mo = ar["uni_by_month"].get(mo, pd.DataFrame())
+                if uni_mo is not None and not uni_mo.empty:
+                    st.dataframe(uni_mo, use_container_width=True, hide_index=True)
+                else:
+                    safe_warn(f"{mo}월 데이터가 없습니다.")
 
-            st.markdown("**포인트-바이시리얼 상관 (8월)**")
-            if ar["pb_aug"] is not None and not ar["pb_aug"].empty:
-                st.dataframe(ar["pb_aug"], use_container_width=True, hide_index=True)
-            else:
-                safe_warn("데이터가 없습니다.")
+                st.markdown(f"**포인트-바이시리얼 상관 ({mo}월)**")
+                pb_mo = ar["pb_by_month"].get(mo, pd.DataFrame())
+                if pb_mo is not None and not pb_mo.empty:
+                    st.dataframe(pb_mo, use_container_width=True, hide_index=True)
+                else:
+                    safe_warn(f"{mo}월 데이터가 없습니다.")
+                st.markdown("---")
 
-            st.markdown("---")
             st.markdown("**분위수 × 재원기간 구간 교차표**")
             selected_ct = st.selectbox("교차표 지표 선택", base_metrics, key="ct_metric")
             if selected_ct in ar["crosstabs"]:
@@ -901,18 +928,18 @@ with tab4:
             else:
                 safe_warn(f"{selected_ct} 교차표 생성 불가")
 
-        # ─── TAB 5: TPI 심층 분석 ────────────────────────────────────────
-        with atabs[4]:
+        # ─── TAB 4: TPI 심층 분석 ────────────────────────────────────────
+        with atabs[3]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("TPI 심층 분석")
 
-            if "TPI_8월" in sl.columns:
+            if _tpi_last_col in sl.columns:
                 sl_plot = sl.copy()
                 sl_plot["그룹"] = sl_plot["target_churn_sep"].map({0: "유지", 1: "퇴원"})
 
-                fig = px.histogram(sl_plot, x="TPI_8월", color="그룹", barmode="overlay", nbins=30,
+                fig = px.histogram(sl_plot, x=_tpi_last_col, color="그룹", barmode="overlay", nbins=30,
                                    color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR}, opacity=0.7)
-                fig.update_layout(title="TPI 분포 (유지/퇴원 중첩)", **PLOTLY_LAYOUT)
+                fig.update_layout(title=f"TPI 분포 (유지/퇴원 중첩, {_last_m}월)", **PLOTLY_LAYOUT)
                 st.plotly_chart(fig, use_container_width=True)
 
                 # TPI quintile churn
@@ -923,35 +950,35 @@ with tab4:
                 # Bottom students
                 st.markdown("---")
                 for pct, label in [(10, "하위 10%"), (20, "하위 20%"), (30, "하위 30%")]:
-                    threshold = sl["TPI_8월"].quantile(pct / 100)
+                    threshold = sl[_tpi_last_col].quantile(pct / 100)
                     if pd.notna(threshold):
-                        bottom = sl[sl["TPI_8월"] <= threshold].copy()
+                        bottom = sl[sl[_tpi_last_col] <= threshold].copy()
                         with st.expander(f"TPI {label} ({len(bottom)}명)", expanded=(pct == 20)):
-                            dcols = ["캠퍼스", "학생명", "학생코드", "시험유형", "TPI_8월", "TPI_3월", "TPI_변화량",
-                                     "P-Score_8월", "CI_8월", "QR_8월", "tenure_aug_fixed", "재원기간구간", "target_churn_sep"]
+                            dcols = ["캠퍼스", "학생명", "학생코드", "시험유형", _tpi_last_col, _tpi_first_col, "TPI_변화량",
+                                     f"P-Score_{_last_m}월", f"CI_{_last_m}월", f"QR_{_last_m}월", "tenure_aug_fixed", "재원기간구간", "target_churn_sep"]
                             dcols = [c for c in dcols if c in bottom.columns]
-                            bd = bottom[dcols].sort_values("TPI_8월").reset_index(drop=True)
+                            bd = bottom[dcols].sort_values(_tpi_last_col).reset_index(drop=True)
                             bd = bd.rename(columns={"target_churn_sep": "9월상태(1=퇴원)", "tenure_aug_fixed": "재원기간"})
                             st.dataframe(bd, use_container_width=True, hide_index=True)
 
                 # TPI vs tenure scatter
                 if "tenure_aug_fixed" in sl.columns:
-                    fig = px.scatter(sl_plot, x="tenure_aug_fixed", y="TPI_8월", color="그룹",
-                                     color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR}, opacity=0.6, title="TPI vs 재원기간")
+                    fig = px.scatter(sl_plot, x="tenure_aug_fixed", y=_tpi_last_col, color="그룹",
+                                     color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR}, opacity=0.6, title=f"TPI vs 재원기간 ({_last_m}월)")
                     fig.update_layout(**PLOTLY_LAYOUT)
                     st.plotly_chart(fig, use_container_width=True)
 
                 # TPI by campus
                 if "캠퍼스" in sl.columns:
-                    fig = px.box(sl_plot, x="캠퍼스", y="TPI_8월", color="그룹",
-                                 color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR}, title="캠퍼스별 TPI")
+                    fig = px.box(sl_plot, x="캠퍼스", y=_tpi_last_col, color="그룹",
+                                 color_discrete_map={"유지": RETAINED_COLOR, "퇴원": CHURNED_COLOR}, title=f"캠퍼스별 TPI ({_last_m}월)")
                     fig.update_layout(**PLOTLY_LAYOUT)
                     st.plotly_chart(fig, use_container_width=True)
             else:
-                safe_warn("TPI_8월 데이터가 없습니다.")
+                safe_warn(f"{_tpi_last_col} 데이터가 없습니다.")
 
-        # ─── TAB 6: 월별 흐름 ────────────────────────────────────────────
-        with atabs[5]:
+        # ─── TAB 5: 월별 흐름 ────────────────────────────────────────────
+        with atabs[4]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("월별 흐름 분석")
 
@@ -964,7 +991,7 @@ with tab4:
                     fig.add_trace(go.Scatter(x=mf["월"], y=mf["전체_평균"], name="전체", line=dict(color=BLUE2, width=2, dash="dash")))
                     fig.add_trace(go.Scatter(x=mf["월"], y=mf["유지군_평균"], name="유지군", line=dict(color=RETAINED_COLOR, width=2)))
                     fig.add_trace(go.Scatter(x=mf["월"], y=mf["퇴원군_평균"], name="퇴원군", line=dict(color=CHURNED_COLOR, width=2)))
-                    fig.update_layout(title=f"{flow_metric} 월별 추이 (3~8월)", xaxis_title="월", yaxis_title=flow_metric, **PLOTLY_LAYOUT)
+                    fig.update_layout(title=f"{flow_metric} 월별 추이 ({_first_m}~{_last_m}월)", xaxis_title="월", yaxis_title=flow_metric, **PLOTLY_LAYOUT)
                     st.plotly_chart(fig, use_container_width=True)
                     st.dataframe(mf, use_container_width=True, hide_index=True)
 
@@ -987,8 +1014,8 @@ with tab4:
 
                 # Change table
                 st.markdown("---")
-                st.markdown("**3→8 변화량 표**")
-                change_cols = ["학생명", "학생코드", "TPI_3월", "TPI_8월", "TPI_변화량", "TPI_3~8평균", "TPI_3~8변동성", "target_churn_sep", "재원기간구간"]
+                st.markdown(f"**{_first_m}→{_last_m} 변화량 표**")
+                change_cols = ["학생명", "학생코드", _tpi_first_col, _tpi_last_col, "TPI_변화량", "TPI_평균", "TPI_변동성", "target_churn_sep", "재원기간구간"]
                 change_cols = [c for c in change_cols if c in sl.columns]
                 if change_cols:
                     change_df = sl[change_cols].rename(columns={"target_churn_sep": "9월상태(1=퇴원)"})
@@ -998,8 +1025,8 @@ with tab4:
             else:
                 safe_warn("월별 흐름 데이터가 없습니다.")
 
-        # ─── TAB 7: 위험 신호 탐지 ───────────────────────────────────────
-        with atabs[6]:
+        # ─── TAB 6: 위험 신호 탐지 ───────────────────────────────────────
+        with atabs[5]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("학생 위험 신호 탐지")
             risk_df = ar.get("risk_df", pd.DataFrame())
@@ -1034,7 +1061,7 @@ with tab4:
 
                 risk_filter = st.multiselect("위험도 필터", ["High", "Medium", "Low"], default=["High", "Medium"], key="risk_filter")
                 filtered_risk = risk_df[risk_df["위험도"].isin(risk_filter)].copy()
-                dcols = ["캠퍼스", "학생명", "학생코드", "TPI_3월", "TPI_8월", "TPI_변화량",
+                dcols = ["캠퍼스", "학생명", "학생코드", _tpi_first_col, _tpi_last_col, "TPI_변화량",
                          "tenure_aug_fixed", "재원기간구간", "target_churn_sep", "위험점수", "위험도", "위험사유"]
                 dcols = [c for c in dcols if c in filtered_risk.columns]
                 show_risk = filtered_risk[dcols].sort_values("위험점수", ascending=False).reset_index(drop=True)
@@ -1044,8 +1071,8 @@ with tab4:
             else:
                 safe_warn("위험 데이터 없음")
 
-        # ─── TAB 8: 캠퍼스/시험유형 ──────────────────────────────────────
-        with atabs[7]:
+        # ─── TAB 7: 캠퍼스/시험유형 ──────────────────────────────────────
+        with atabs[6]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("캠퍼스/시험유형 분해")
             campus_df = ar.get("campus_df", pd.DataFrame())
@@ -1073,15 +1100,15 @@ with tab4:
             else:
                 safe_warn("캠퍼스 데이터 없음")
 
-        # ─── TAB 9: 상관분석 ─────────────────────────────────────────────
-        with atabs[8]:
+        # ─── TAB 8: 상관분석 ─────────────────────────────────────────────
+        with atabs[7]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("상관분석")
 
             corr_m = ar.get("corr_matrix", pd.DataFrame())
             if corr_m is not None and not corr_m.empty:
                 fig = px.imshow(corr_m.values, x=corr_m.columns.tolist(), y=corr_m.index.tolist(),
-                               color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto", title="8월 지표 Pearson 상관행렬")
+                               color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto", title=f"{_last_m}월 지표 Pearson 상관행렬")
                 fig.update_layout(**PLOTLY_LAYOUT)
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -1100,33 +1127,31 @@ with tab4:
             else:
                 safe_warn("데이터 없음")
 
-        # ─── TAB 10: 회귀분석 ────────────────────────────────────────────
-        with atabs[9]:
+        # ─── TAB 9: 회귀분석 ────────────────────────────────────────────
+        with atabs[8]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("회귀분석")
 
             # Tenure breakdown table for regression context
-            st.markdown("**재원기간 구간별 8월 지표 평균 (회귀 배경)**")
-            tb_reg = _build_tenure_summary_table(sl, ["TPI", "P-Score", "CI", "QR", "B.CV"], "_8월")
+            st.markdown(f"**재원기간 구간별 {_last_m}월 지표 평균 (회귀 배경)**")
+            tb_reg = _build_tenure_summary_table(sl, ["TPI", "P-Score", "CI", "QR", "B.CV"], f"_{_last_m}월")
             if not tb_reg.empty:
                 st.dataframe(tb_reg, use_container_width=True, hide_index=True)
 
             st.markdown("---")
-            st.markdown("**A. 단변량 로지스틱 회귀 (8월)**")
-            if ar["uni_aug"] is not None and not ar["uni_aug"].empty:
-                st.dataframe(ar["uni_aug"], use_container_width=True, hide_index=True)
-            else:
-                safe_warn("데이터 없음")
+            # Per-month univariate logistic regression
+            for mo in _sel_months:
+                st.markdown(f"**단변량 로지스틱 회귀 ({mo}월)**")
+                uni_mo = ar["uni_by_month"].get(mo, pd.DataFrame())
+                if uni_mo is not None and not uni_mo.empty:
+                    st.dataframe(uni_mo, use_container_width=True, hide_index=True)
+                else:
+                    safe_warn(f"{mo}월 데이터 없음")
 
-            st.markdown("**단변량 로지스틱 회귀 (3월)**")
-            if ar["uni_mar"] is not None and not ar["uni_mar"].empty:
-                st.dataframe(ar["uni_mar"], use_container_width=True, hide_index=True)
-            else:
-                safe_warn("데이터 없음")
-
-            st.markdown("**단변량 로지스틱 회귀 (변화량)**")
-            if ar["uni_delta"] is not None and not ar["uni_delta"].empty:
-                st.dataframe(ar["uni_delta"], use_container_width=True, hide_index=True)
+            st.markdown(f"**단변량 로지스틱 회귀 (변화량 {_first_m}→{_last_m})**")
+            uni_delta = ar.get("uni_delta", pd.DataFrame())
+            if uni_delta is not None and not uni_delta.empty:
+                st.dataframe(uni_delta, use_container_width=True, hide_index=True)
             else:
                 safe_warn("데이터 없음")
 
@@ -1159,8 +1184,8 @@ with tab4:
             else:
                 safe_warn("다변량 모델 데이터 없음")
 
-        # ─── TAB 11: 생존분석 ────────────────────────────────────────────
-        with atabs[10]:
+        # ─── TAB 10: 생존분석 ────────────────────────────────────────────
+        with atabs[9]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("생존분석")
             st.caption("재원기간을 보조적으로 활용한 생존분석")
@@ -1192,8 +1217,8 @@ with tab4:
             st.markdown("---")
             st.caption("생존분석은 보조분석입니다.")
 
-        # ─── TAB 12: 통합 통계 ───────────────────────────────────────────
-        with atabs[11]:
+        # ─── TAB 11: 통합 통계 ───────────────────────────────────────────
+        with atabs[10]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("통합 통계 분석")
 
@@ -1204,9 +1229,10 @@ with tab4:
                 safe_warn("통합 요약 생성 불가")
 
             st.markdown("---")
-            st.markdown("**단변량 회귀 핵심 요약**")
-            if ar["uni_aug"] is not None and not ar["uni_aug"].empty and "AUC" in ar["uni_aug"].columns:
-                top5 = ar["uni_aug"].nlargest(5, "AUC", keep="first")
+            st.markdown(f"**단변량 회귀 핵심 요약 ({_last_m}월)**")
+            uni_last = ar["uni_by_month"].get(_last_m, pd.DataFrame())
+            if uni_last is not None and not uni_last.empty and "AUC" in uni_last.columns:
+                top5 = uni_last.nlargest(5, "AUC", keep="first")
                 st.dataframe(top5, use_container_width=True, hide_index=True)
 
             st.markdown("**다변량 모델 성능 비교**")
@@ -1225,9 +1251,11 @@ with tab4:
                 n = len(sub)
                 churned = int(sub["target_churn_sep"].sum()) if n > 0 else 0
                 rate = round(churned / n * 100, 1) if n > 0 else 0
-                avg_tpi = sub["TPI_8월"].mean() if "TPI_8월" in sub.columns and n > 0 else np.nan
-                avg_ci = sub["CI_8월"].mean() if "CI_8월" in sub.columns and n > 0 else np.nan
-                avg_qr = sub["QR_8월"].mean() if "QR_8월" in sub.columns and n > 0 else np.nan
+                avg_tpi = sub[_tpi_last_col].mean() if _tpi_last_col in sub.columns and n > 0 else np.nan
+                _ci_col = f"CI_{_last_m}월"
+                _qr_col = f"QR_{_last_m}월"
+                avg_ci = sub[_ci_col].mean() if _ci_col in sub.columns and n > 0 else np.nan
+                avg_qr = sub[_qr_col].mean() if _qr_col in sub.columns and n > 0 else np.nan
                 tenure_rows.append({
                     "구간": label, "학생수": n, "퇴원수": churned, "퇴원율(%)": rate,
                     "평균TPI": round(avg_tpi, 2) if pd.notna(avg_tpi) else "N/A",
@@ -1239,8 +1267,8 @@ with tab4:
             st.markdown("---")
             safe_info("통계적으로 유의하더라도 표본이 작거나 효과크기가 약한 경우 실무 적용에 주의가 필요합니다.")
 
-        # ─── TAB 13: 다운로드 ────────────────────────────────────────────
-        with atabs[12]:
+        # ─── TAB 12: 다운로드 ────────────────────────────────────────────
+        with atabs[11]:
             _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
             st.subheader("결과 다운로드")
             st.caption("코호트 기준 결과")
@@ -1263,9 +1291,14 @@ with tab4:
             download_files["03_코호트_요약.csv"] = cs_csv
             st.download_button("3. 코호트 요약", data=cs_csv, file_name="코호트_요약.csv", mime="text/csv", key="dl_cohort")
 
-            # 4. Comparison
-            if not ar["comp_aug"].empty:
-                comp_csv = ac_to_csv_bytes(ar["comp_aug"])
+            # 4. Comparison (all months)
+            comp_frames = []
+            for mo, comp_df in ar["comp_by_month"].items():
+                if not comp_df.empty:
+                    comp_frames.append(comp_df.assign(기준월=f"{mo}월"))
+            if comp_frames:
+                all_comp = pd.concat(comp_frames, ignore_index=True)
+                comp_csv = ac_to_csv_bytes(all_comp)
                 download_files["04_비교표.csv"] = comp_csv
                 st.download_button("4. 유지 vs 퇴원 비교표", data=comp_csv, file_name="비교표.csv", mime="text/csv", key="dl_comp")
 
@@ -1301,9 +1334,14 @@ with tab4:
                 download_files["09_상관분석.csv"] = corr_csv
                 st.download_button("9. 상관분석", data=corr_csv, file_name="상관분석.csv", mime="text/csv", key="dl_corr")
 
-            # 10. Regression
-            if ar["uni_aug"] is not None and not ar["uni_aug"].empty:
-                reg_csv = ac_to_csv_bytes(ar["uni_aug"])
+            # 10. Regression (all months)
+            uni_frames = []
+            for mo, uni_df in ar["uni_by_month"].items():
+                if uni_df is not None and not uni_df.empty:
+                    uni_frames.append(uni_df.assign(기준월=f"{mo}월"))
+            if uni_frames:
+                all_uni = pd.concat(uni_frames, ignore_index=True)
+                reg_csv = ac_to_csv_bytes(all_uni)
                 download_files["10_회귀_단변량.csv"] = reg_csv
                 st.download_button("10. 회귀 (단변량)", data=reg_csv, file_name="회귀_단변량.csv", mime="text/csv", key="dl_reg_uni")
 
@@ -1335,3 +1373,24 @@ with tab4:
                     file_name="PolyRetentionSignal_전체결과.zip", mime="application/zip",
                     key="dl_zip", type="primary",
                 )
+
+        # ─── TAB 13: TPI 지수 구성 ────────────────────────────────────────
+        with atabs[12]:
+            _condition_badge(_formula, _s_etypes, _s_months, include_na=_inc_na)
+            st.subheader("TPI 지수 구성 정의")
+            st.markdown(f"**현재 적용된 TPI 수식:** `{_formula}`")
+            st.dataframe(config_df, use_container_width=True, hide_index=True)
+
+            if ew:
+                total_w = sum(v for v in ew.values() if v > 0)
+                st.markdown(f"**가중치 합계:** {total_w}")
+
+            st.markdown("---")
+            st.markdown("**분석 코호트 정의:**")
+            st.markdown(f"- 코호트 규모: {meta['cohort_size']}명 (유지: {meta['retained_count']}명, 퇴원: {meta['churned_count']}명)")
+            if meta.get("na_excluded"):
+                st.markdown(f"- N/A 제외 학생: {meta['na_excluded']}명")
+
+            st.markdown("**재원기간 구간 정의:**")
+            for label in TENURE_LABELS_INTERNAL:
+                st.markdown(f"- {label}")

@@ -459,6 +459,44 @@ button[data-baseweb="tab"] {{
 [data-baseweb="select"] > div:first-child:hover {{
     border-color: {BLUE1} !important;
 }}
+
+/* ── Filter checkbox (전체 toggle) ─────────────────────── */
+.filter-container [data-testid="stCheckbox"] {{
+    margin-top: 0px !important;
+}}
+.filter-container [data-testid="stCheckbox"] label {{
+    font-size: 0.75rem !important;
+    font-weight: 600 !important;
+    color: {BLUE1} !important;
+    gap: 4px !important;
+}}
+.filter-container [data-testid="stCheckbox"] label span[data-testid="stCheckbox-label"] {{
+    color: {BLUE1} !important;
+}}
+.filter-container [data-testid="stCheckbox"] div[role="checkbox"] {{
+    border-color: {BLUE1} !important;
+    width: 18px !important;
+    height: 18px !important;
+    border-radius: 4px !important;
+}}
+.filter-container [data-testid="stCheckbox"] div[role="checkbox"][aria-checked="true"] {{
+    background-color: {BLUE1} !important;
+    border-color: {BLUE1} !important;
+}}
+
+/* ── Multiselect clear icon ───────────────────────────── */
+[data-baseweb="select"] svg {{
+    color: {TEXT_MUTED} !important;
+}}
+[data-baseweb="select"] svg:hover {{
+    color: {BLUE1} !important;
+}}
+
+/* ── Analysis sub-tabs styling ────────────────────────── */
+button[data-baseweb="tab"] {{
+    font-size: 0.82rem !important;
+    padding: 8px 12px !important;
+}}
 </style>
 """
 

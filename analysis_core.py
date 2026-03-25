@@ -98,6 +98,32 @@ def extract_cohort(
     cohort_all_records = df_valid[df_valid["학생코드_int"].isin(cohort_status["학생코드_int"])].copy()
     cohort_all_records = cohort_all_records.merge(cohort_status, on="학생코드_int", how="left")
 
+    # Ensure students with NO exam records still appear (stub rows)
+    codes_with_exams = set(cohort_all_records["학생코드_int"].unique())
+    codes_without_exams = set(cohort_status["학생코드_int"]) - codes_with_exams
+    if codes_without_exams:
+        # Build campus/name maps from student_info
+        campus_map = dict(
+            zip(student_info["student_code"].astype(int), student_info["master_campus"])
+        )
+        name_map = dict(
+            zip(student_info["student_code"].astype(int), student_info["master_student_name"])
+        )
+        stub_rows = []
+        for code in codes_without_exams:
+            churn = cohort_status.loc[
+                cohort_status["학생코드_int"] == code, "target_churn_sep"
+            ].iloc[0]
+            stub_rows.append({
+                "학생코드_int": int(code),
+                "학생코드": str(int(code)),
+                "target_churn_sep": churn,
+                "캠퍼스": campus_map.get(int(code), ""),
+                "학생명": name_map.get(int(code), ""),
+            })
+        stub_df = pd.DataFrame(stub_rows)
+        cohort_all_records = pd.concat([cohort_all_records, stub_df], ignore_index=True)
+
     # Get tenure from student_info (Aug 2025 fixed)
     tenure_map = dict(
         zip(
@@ -124,20 +150,24 @@ def extract_cohort(
 def build_cohort_student_level(
     cohort_df: pd.DataFrame,
     student_info: pd.DataFrame,
+    selected_months: Optional[List[int]] = None,
 ) -> pd.DataFrame:
     """
-    Build a student-level summary for the cohort with March values, Aug values,
-    deltas, averages, variability.
+    Build a student-level summary for the cohort.
+    Generates per-month columns for every month in selected_months,
+    plus delta (first→last), average, variability, and slope.
     """
     if cohort_df.empty:
         return pd.DataFrame()
 
+    if selected_months is None:
+        selected_months = [3, 4, 5, 6, 7, 8]
+    selected_months = sorted(int(m) for m in selected_months)
+    first_month = min(selected_months)
+    last_month = max(selected_months)
+
     metric_cols = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR", "TPI"]
     available_metrics = [c for c in metric_cols if c in cohort_df.columns]
-
-    id_cols = ["학생코드_int", "target_churn_sep", "tenure_aug_fixed", "재원기간구간"]
-    # Also get student name and campus from first record
-    extra_cols = ["캠퍼스", "학생명", "시험유형"]
 
     records = []
     for code, grp in cohort_df.groupby("학생코드_int"):
@@ -150,49 +180,61 @@ def build_cohort_student_level(
             "학생명": grp["학생명"].iloc[0] if "학생명" in grp.columns else "",
         }
 
+        # Check if this student has exam records
+        has_exam = "연도" in grp.columns and grp["연도"].notna().any()
+
         # Get exam types
-        exam_types = grp["시험유형"].unique().tolist() if "시험유형" in grp.columns else []
+        if has_exam and "시험유형" in grp.columns:
+            exam_types = grp["시험유형"].dropna().unique().tolist()
+        else:
+            exam_types = []
         rec["시험유형"] = ", ".join(str(e) for e in exam_types)
 
         for m in available_metrics:
-            # March values (year=2025, month=3)
-            mar_vals = grp.loc[
-                (grp["연도"].astype(int) == 2025) & (grp["월"].astype(int) == 3), m
-            ].dropna()
-            mar_val = mar_vals.mean() if len(mar_vals) > 0 else np.nan
+            if not has_exam or m not in grp.columns:
+                # No exam records — fill all with NaN
+                for mo in selected_months:
+                    rec[f"{m}_{mo}월"] = np.nan
+                rec[f"{m}_변화량"] = np.nan
+                rec[f"{m}_변화율"] = np.nan
+                rec[f"{m}_평균"] = np.nan
+                rec[f"{m}_변동성"] = np.nan
+                rec[f"{m}_추세기울기"] = np.nan
+                continue
 
-            # August values
-            aug_vals = grp.loc[
-                (grp["연도"].astype(int) == 2025) & (grp["월"].astype(int) == 8), m
-            ].dropna()
-            aug_val = aug_vals.mean() if len(aug_vals) > 0 else np.nan
+            # Per-month values
+            month_vals = {}
+            for mo in selected_months:
+                vals = grp.loc[
+                    (grp["연도"].astype(float).astype(int) == 2025)
+                    & (grp["월"].astype(float).astype(int) == mo),
+                    m,
+                ].dropna()
+                val = vals.mean() if len(vals) > 0 else np.nan
+                rec[f"{m}_{mo}월"] = val
+                month_vals[mo] = val
 
-            rec[f"{m}_3월"] = mar_val
-            rec[f"{m}_8월"] = aug_val
-
-            # Delta and rate
-            if pd.notna(mar_val) and pd.notna(aug_val):
-                rec[f"{m}_변화량"] = aug_val - mar_val
-                rec[f"{m}_변화율"] = ((aug_val - mar_val) / mar_val * 100) if mar_val != 0 else np.nan
+            # Delta: last_month - first_month
+            first_val = month_vals.get(first_month, np.nan)
+            last_val = month_vals.get(last_month, np.nan)
+            if pd.notna(first_val) and pd.notna(last_val):
+                rec[f"{m}_변화량"] = last_val - first_val
+                rec[f"{m}_변화율"] = ((last_val - first_val) / first_val * 100) if first_val != 0 else np.nan
             else:
                 rec[f"{m}_변화량"] = np.nan
                 rec[f"{m}_변화율"] = np.nan
 
-            # 3~8 average and variability (all months between 3 and 8)
-            range_vals = grp.loc[
-                (grp["연도"].astype(int) == 2025)
-                & (grp["월"].astype(int) >= 3)
-                & (grp["월"].astype(int) <= 8),
-                m,
-            ].dropna()
-            rec[f"{m}_3~8평균"] = range_vals.mean() if len(range_vals) > 0 else np.nan
-            rec[f"{m}_3~8변동성"] = range_vals.std() if len(range_vals) > 1 else np.nan
+            # Average and variability across selected months
+            all_vals = [v for v in month_vals.values() if pd.notna(v)]
+            rec[f"{m}_평균"] = np.mean(all_vals) if all_vals else np.nan
+            rec[f"{m}_변동성"] = np.std(all_vals, ddof=1) if len(all_vals) > 1 else np.nan
 
             # Slope if 3+ observations
-            if len(range_vals) >= 3:
-                months_idx = grp.loc[range_vals.index, "월"].astype(int).values
+            if len(all_vals) >= 3:
+                months_with_vals = [mo for mo in selected_months if pd.notna(month_vals.get(mo))]
+                vals_for_slope = [month_vals[mo] for mo in months_with_vals]
                 try:
-                    slope = np.polyfit(months_idx, range_vals.values, 1)[0]
+                    slope = np.polyfit(months_with_vals, vals_for_slope, 1)[0]
                     rec[f"{m}_추세기울기"] = slope
                 except Exception:
                     rec[f"{m}_추세기울기"] = np.nan
@@ -483,33 +525,38 @@ def multivariate_logistic(
         return {"모델": model_name, "AUC": np.nan, "Accuracy": np.nan, "Precision": np.nan, "Recall": np.nan, "F1": np.nan, "유효표본수": len(valid), "해석": f"오류: {e}", "coefs": {}}
 
 
-def run_all_multivariate_models(student_df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Run all defined multivariate models."""
-    base_metrics_8 = ["TPI_8월"]
-    metrics_8 = [f"{m}_8월" for m in ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]]
-    metrics_3 = [f"{m}_3월" for m in ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]]
-    metrics_delta = [f"{m}_변화량" for m in ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]]
+def run_all_multivariate_models(
+    student_df: pd.DataFrame,
+    last_month: int = 8,
+    first_month: int = 3,
+) -> List[Dict[str, Any]]:
+    """Run all defined multivariate models using dynamic month references."""
+    base_names = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]
+    tpi_last = f"TPI_{last_month}월"
+    metrics_last = [f"{m}_{last_month}월" for m in base_names]
+    metrics_first = [f"{m}_{first_month}월" for m in base_names]
+    metrics_delta = [f"{m}_변화량" for m in base_names]
 
     models = []
-    # Model A: TPI only
-    models.append(multivariate_logistic(student_df, ["TPI_8월"], model_name="Model A: TPI"))
+    # Model A: TPI only (last month)
+    models.append(multivariate_logistic(student_df, [tpi_last], model_name=f"Model A: TPI ({last_month}월)"))
     # Model B: TPI + tenure
-    models.append(multivariate_logistic(student_df, ["TPI_8월", "tenure_aug_fixed"], model_name="Model B: TPI + 재원기간"))
+    models.append(multivariate_logistic(student_df, [tpi_last, "tenure_aug_fixed"], model_name=f"Model B: TPI + 재원기간 ({last_month}월)"))
     # Model C: TPI + tenure + exam type dummy
     if "시험유형" in student_df.columns:
         df_tmp = student_df.copy()
         df_tmp["시험유형_MT"] = (df_tmp["시험유형"].str.contains("MT", na=False)).astype(int)
-        models.append(multivariate_logistic(df_tmp, ["TPI_8월", "tenure_aug_fixed", "시험유형_MT"], model_name="Model C: TPI + 재원기간 + 시험유형"))
-    # Model D: All individual metrics + tenure
-    models.append(multivariate_logistic(student_df, metrics_8 + ["tenure_aug_fixed"], model_name="Model D: 전체 8월 지표 + 재원기간"))
-    # Model: 3월 only
-    models.append(multivariate_logistic(student_df, metrics_3, model_name="3월 지표 모델"))
-    # Model: 8월 only
-    models.append(multivariate_logistic(student_df, metrics_8, model_name="8월 지표 모델"))
-    # Model: 변화량 only
-    models.append(multivariate_logistic(student_df, metrics_delta, model_name="3→8 변화량 모델"))
-    # Model: 8월 + 변화량
-    models.append(multivariate_logistic(student_df, metrics_8 + metrics_delta, model_name="8월 수준 + 변화량 결합 모델"))
+        models.append(multivariate_logistic(df_tmp, [tpi_last, "tenure_aug_fixed", "시험유형_MT"], model_name=f"Model C: TPI + 재원기간 + 시험유형 ({last_month}월)"))
+    # Model D: All individual metrics + tenure (last month)
+    models.append(multivariate_logistic(student_df, metrics_last + ["tenure_aug_fixed"], model_name=f"Model D: 전체 {last_month}월 지표 + 재원기간"))
+    # Model: first month only
+    models.append(multivariate_logistic(student_df, metrics_first, model_name=f"{first_month}월 지표 모델"))
+    # Model: last month only
+    models.append(multivariate_logistic(student_df, metrics_last, model_name=f"{last_month}월 지표 모델"))
+    # Model: delta only
+    models.append(multivariate_logistic(student_df, metrics_delta, model_name=f"{first_month}→{last_month} 변화량 모델"))
+    # Model: last month + delta
+    models.append(multivariate_logistic(student_df, metrics_last + metrics_delta, model_name=f"{last_month}월 수준 + 변화량 결합 모델"))
 
     return models
 
@@ -554,6 +601,7 @@ def run_survival_analysis(
     student_df: pd.DataFrame,
     duration_col: str = "tenure_aug_fixed",
     event_col: str = "target_churn_sep",
+    last_month: int = 8,
 ) -> Dict[str, Any]:
     """Run Kaplan-Meier and Cox PH if lifelines available."""
     result = {"km_data": None, "cox_summary": None, "cox_table": None, "error": None}
@@ -564,19 +612,20 @@ def run_survival_analysis(
         result["error"] = "생존분석에 충분한 표본이 없습니다."
         return result
 
+    tpi_col = f"TPI_{last_month}월"
     try:
         from lifelines import KaplanMeierFitter, CoxPHFitter
 
         # KM by TPI group
         km_data = {}
-        if "TPI_8월" in student_df.columns:
-            df_km = student_df[[duration_col, event_col, "TPI_8월"]].dropna()
+        if tpi_col in student_df.columns:
+            df_km = student_df[[duration_col, event_col, tpi_col]].dropna()
             df_km = df_km[df_km[duration_col] > 0]
             if len(df_km) >= 10:
                 try:
-                    df_km["TPI그룹"] = pd.qcut(df_km["TPI_8월"], q=3, labels=["하위", "중위", "상위"], duplicates="drop")
+                    df_km["TPI그룹"] = pd.qcut(df_km[tpi_col], q=3, labels=["하위", "중위", "상위"], duplicates="drop")
                 except ValueError:
-                    df_km["TPI그룹"] = pd.cut(df_km["TPI_8월"], bins=3, labels=["하위", "중위", "상위"])
+                    df_km["TPI그룹"] = pd.cut(df_km[tpi_col], bins=3, labels=["하위", "중위", "상위"])
 
                 for grp_name in ["하위", "중위", "상위"]:
                     sub = df_km[df_km["TPI그룹"] == grp_name]
@@ -588,8 +637,7 @@ def run_survival_analysis(
         result["km_data"] = km_data
 
         # Cox PH
-        cox_features = [duration_col, event_col]
-        potential = ["TPI_8월", "P-Score_8월", "CI_8월", "QR_8월", "B.CV_8월"]
+        potential = [f"TPI_{last_month}월", f"P-Score_{last_month}월", f"CI_{last_month}월", f"QR_{last_month}월", f"B.CV_{last_month}월"]
         cox_cols = [c for c in potential if c in student_df.columns]
         df_cox = student_df[cox_cols + [duration_col, event_col]].dropna()
         df_cox = df_cox[df_cox[duration_col] > 0]
@@ -621,57 +669,66 @@ def run_survival_analysis(
 
 # ── Risk scoring ─────────────────────────────────────────────────────────────
 
-def compute_risk_scores(student_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute risk scores for each cohort student."""
+def compute_risk_scores(
+    student_df: pd.DataFrame,
+    last_month: int = 8,
+    first_month: int = 3,
+) -> pd.DataFrame:
+    """Compute risk scores for each cohort student using dynamic month references."""
     df = student_df.copy()
     df["위험점수"] = 0
     df["위험사유"] = ""
+    lm = last_month
 
     def add_risk(mask, points, reason):
         df.loc[mask, "위험점수"] += points
         df.loc[mask, "위험사유"] += reason + "; "
 
-    # TPI 8월 하위 20%
-    if "TPI_8월" in df.columns:
-        threshold = df["TPI_8월"].quantile(0.2)
+    # TPI last_month 하위 20%
+    tpi_col = f"TPI_{lm}월"
+    if tpi_col in df.columns:
+        threshold = df[tpi_col].quantile(0.2)
         if pd.notna(threshold):
-            add_risk(df["TPI_8월"] <= threshold, 3, "8월 TPI 하위20%")
+            add_risk(df[tpi_col] <= threshold, 3, f"{lm}월 TPI 하위20%")
 
-    # CI 8월 하위 20%
-    if "CI_8월" in df.columns:
-        threshold = df["CI_8월"].quantile(0.2)
+    # CI last_month 하위 20%
+    ci_col = f"CI_{lm}월"
+    if ci_col in df.columns:
+        threshold = df[ci_col].quantile(0.2)
         if pd.notna(threshold):
-            add_risk(df["CI_8월"] <= threshold, 2, "8월 CI 하위20%")
+            add_risk(df[ci_col] <= threshold, 2, f"{lm}월 CI 하위20%")
 
-    # QR 8월 하위 20%
-    if "QR_8월" in df.columns:
-        threshold = df["QR_8월"].quantile(0.2)
+    # QR last_month 하위 20%
+    qr_col = f"QR_{lm}월"
+    if qr_col in df.columns:
+        threshold = df[qr_col].quantile(0.2)
         if pd.notna(threshold):
-            add_risk(df["QR_8월"] <= threshold, 2, "8월 QR 하위20%")
+            add_risk(df[qr_col] <= threshold, 2, f"{lm}월 QR 하위20%")
 
-    # BCV 8월 하위 20%
-    if "B.CV_8월" in df.columns:
-        threshold = df["B.CV_8월"].quantile(0.2)
+    # BCV last_month 하위 20%
+    bcv_col = f"B.CV_{lm}월"
+    if bcv_col in df.columns:
+        threshold = df[bcv_col].quantile(0.2)
         if pd.notna(threshold):
-            add_risk(df["B.CV_8월"] <= threshold, 1, "8월 BCV 하위20%")
+            add_risk(df[bcv_col] <= threshold, 1, f"{lm}월 BCV 하위20%")
 
-    # TPI 3→8 하락
+    # TPI 변화량 하락
     if "TPI_변화량" in df.columns:
-        add_risk(df["TPI_변화량"] < 0, 2, "TPI 3→8 하락")
+        add_risk(df["TPI_변화량"] < 0, 2, f"TPI {first_month}→{lm} 하락")
 
-    # CI 3→8 하락
+    # CI 변화량 하락
     if "CI_변화량" in df.columns:
-        add_risk(df["CI_변화량"] < 0, 1, "CI 3→8 하락")
+        add_risk(df["CI_변화량"] < 0, 1, f"CI {first_month}→{lm} 하락")
 
-    # QR 3→8 하락
+    # QR 변화량 하락
     if "QR_변화량" in df.columns:
-        add_risk(df["QR_변화량"] < 0, 1, "QR 3→8 하락")
+        add_risk(df["QR_변화량"] < 0, 1, f"QR {first_month}→{lm} 하락")
 
     # Short tenure + low performance
-    if "tenure_aug_fixed" in df.columns and "TPI_8월" in df.columns:
+    if "tenure_aug_fixed" in df.columns and tpi_col in df.columns:
         short_tenure = df["tenure_aug_fixed"] <= 6
-        tpi_threshold = df["TPI_8월"].quantile(0.3) if pd.notna(df["TPI_8월"].quantile(0.3)) else 50
-        low_perf = df["TPI_8월"] <= tpi_threshold
+        tpi_threshold = df[tpi_col].quantile(0.3) if pd.notna(df[tpi_col].quantile(0.3)) else 50
+        low_perf = df[tpi_col] <= tpi_threshold
         add_risk(short_tenure & low_perf, 1, "짧은 재원기간+저성과")
 
     # Risk level
@@ -690,23 +747,30 @@ def compute_risk_scores(student_df: pd.DataFrame) -> pd.DataFrame:
 def build_monthly_flow(
     cohort_df: pd.DataFrame,
     metric: str = "TPI",
+    selected_months: Optional[List[int]] = None,
 ) -> pd.DataFrame:
     """Build monthly average for a metric, split by churn group."""
     if metric not in cohort_df.columns:
         return pd.DataFrame()
 
-    df = cohort_df[
-        (cohort_df["연도"].astype(int) == 2025)
-        & (cohort_df["월"].astype(int) >= 3)
-        & (cohort_df["월"].astype(int) <= 8)
-    ].copy()
+    if selected_months is None:
+        selected_months = list(range(3, 9))
+    selected_months = sorted(int(m) for m in selected_months)
+
+    # Filter to rows with valid 연도/월
+    valid_mask = cohort_df["연도"].notna() & cohort_df["월"].notna()
+    df = cohort_df[valid_mask].copy()
+    df = df[
+        (df["연도"].astype(float).astype(int) == 2025)
+        & (df["월"].astype(float).astype(int).isin(selected_months))
+    ]
 
     if df.empty:
         return pd.DataFrame()
 
     rows = []
-    for month in range(3, 9):
-        month_data = df[df["월"].astype(int) == month]
+    for month in selected_months:
+        month_data = df[df["월"].astype(float).astype(int) == month]
         if month_data.empty:
             continue
 
@@ -729,24 +793,25 @@ def build_monthly_flow(
 
 # ── Campus breakdown ─────────────────────────────────────────────────────────
 
-def campus_summary(student_df: pd.DataFrame) -> pd.DataFrame:
+def campus_summary(student_df: pd.DataFrame, last_month: int = 8) -> pd.DataFrame:
     """Campus-level summary."""
     if "캠퍼스" not in student_df.columns:
         return pd.DataFrame()
 
+    tpi_col = f"TPI_{last_month}월"
     rows = []
     for campus, grp in student_df.groupby("캠퍼스"):
         n = len(grp)
         churned = int(grp["target_churn_sep"].sum())
         retained = n - churned
-        tpi_mean = grp["TPI_8월"].mean() if "TPI_8월" in grp.columns else np.nan
+        tpi_mean = grp[tpi_col].mean() if tpi_col in grp.columns else np.nan
         risk_high = int((grp["위험도"] == "High").sum()) if "위험도" in grp.columns else 0
         risk_medium = int((grp["위험도"] == "Medium").sum()) if "위험도" in grp.columns else 0
 
         # Bottom 20% ratio
-        if "TPI_8월" in grp.columns and "TPI_8월" in student_df.columns:
-            threshold = student_df["TPI_8월"].quantile(0.2)
-            bottom_pct = (grp["TPI_8월"] <= threshold).mean() * 100 if pd.notna(threshold) else np.nan
+        if tpi_col in grp.columns and tpi_col in student_df.columns:
+            threshold = student_df[tpi_col].quantile(0.2)
+            bottom_pct = (grp[tpi_col] <= threshold).mean() * 100 if pd.notna(threshold) else np.nan
         else:
             bottom_pct = np.nan
 
