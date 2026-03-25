@@ -17,10 +17,10 @@ import pandas as pd
 TENURE_BINS = [0, 6, 12, 18, 24, float("inf")]
 TENURE_LABELS_INTERNAL = [
     "6개월 이하",
-    "12개월 이하",
-    "18개월 이하",
-    "24개월 이하",
-    "25개월 이상",
+    "6개월초과~12개월이하",
+    "12개월초과~18개월이하",
+    "18개월초과~24개월이하",
+    "24개월 초과",
 ]
 
 def assign_tenure_bucket(months: pd.Series) -> pd.Series:

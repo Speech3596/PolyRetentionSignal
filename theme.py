@@ -201,6 +201,173 @@ button[data-baseweb="tab"] {{
     font-size: 0.8rem;
     margin-left: 4px;
 }}
+
+/* ── Landing page ────────────────────────────────────────── */
+.landing-container {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 70vh;
+    padding: 40px 20px;
+}}
+.landing-logo {{
+    max-width: 280px;
+    margin-bottom: 16px;
+}}
+.landing-title {{
+    font-family: 'Pretendard', 'Noto Sans KR', sans-serif;
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: {BLUE1};
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+}}
+.landing-subtitle {{
+    font-size: 1rem;
+    color: {TEXT_MUTED};
+    margin-bottom: 36px;
+    letter-spacing: 1px;
+}}
+.upload-card {{
+    background: {CARD_BG};
+    border-radius: 14px;
+    padding: 28px 24px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+    border-top: 4px solid {BLUE1};
+    min-height: 180px;
+}}
+.upload-card h4 {{
+    color: {BLUE1};
+    margin-bottom: 8px;
+    font-weight: 700;
+}}
+.upload-card .upload-hint {{
+    font-size: 0.82rem;
+    color: {TEXT_MUTED};
+    margin-bottom: 12px;
+}}
+
+/* ── Loading overlay ─────────────────────────────────────── */
+.loading-overlay {{
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(26, 31, 54, 0.82);
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+}}
+.poly-anim-text {{
+    font-family: 'Arial Black', 'Helvetica Neue', sans-serif;
+    font-size: 100px;
+    font-weight: 900;
+    letter-spacing: -2px;
+    background: linear-gradient(90deg,
+        {BLUE1} 0%, {BLUE1} var(--fill),
+        rgba(0,79,159,0.18) var(--fill), rgba(0,79,159,0.18) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: polyFillSweep 2.2s ease-in-out infinite;
+}}
+@keyframes polyFillSweep {{
+    0%   {{ --fill: 0%;   }}
+    50%  {{ --fill: 100%; }}
+    100% {{ --fill: 0%;   }}
+}}
+@supports not (animation-timeline: view()) {{
+    .poly-anim-text {{
+        animation: polyFillFallback 2.2s ease-in-out infinite;
+    }}
+    @keyframes polyFillFallback {{
+        0%   {{ background-position: 200% center; }}
+        50%  {{ background-position: 0% center;   }}
+        100% {{ background-position: 200% center; }}
+    }}
+}}
+.poly-anim-text {{
+    background-size: 200% 100%;
+    animation: polyFillFallback 2.2s ease-in-out infinite;
+}}
+@keyframes polyFillFallback {{
+    0%   {{ background-position: 200% center; }}
+    50%  {{ background-position: 0% center;   }}
+    100% {{ background-position: 200% center; }}
+}}
+.loading-msg {{
+    color: rgba(255,255,255,0.85);
+    font-size: 1.1rem;
+    margin-top: 18px;
+    letter-spacing: 2px;
+}}
+
+/* ── File accordion ──────────────────────────────────────── */
+.file-accordion {{
+    background: {CARD_BG};
+    border-radius: 10px;
+    padding: 10px 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    cursor: pointer;
+    user-select: none;
+    border-left: 4px solid {BLUE1};
+}}
+.file-accordion summary {{
+    font-weight: 600;
+    color: {BLUE1};
+    font-size: 0.92rem;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}}
+.file-accordion summary::before {{
+    content: "\\25B6";
+    font-size: 0.7rem;
+    transition: transform 0.2s;
+}}
+.file-accordion[open] summary::before {{
+    transform: rotate(90deg);
+}}
+.file-accordion .file-list {{
+    margin-top: 8px;
+    padding-left: 18px;
+    font-size: 0.84rem;
+    color: {TEXT_MUTED};
+    line-height: 1.7;
+}}
+
+/* ── Condition badge ─────────────────────────────────────── */
+.condition-bar {{
+    background: linear-gradient(135deg, {BLUE2}, {BLUE1});
+    color: {WHITE};
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    margin-bottom: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+}}
+.condition-bar span {{
+    background: rgba(255,255,255,0.18);
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-weight: 600;
+}}
+
+/* ── Hide sidebar when not needed ────────────────────────── */
+.no-sidebar section[data-testid="stSidebar"] {{
+    display: none !important;
+}}
+.no-sidebar .stMainBlockContainer {{
+    max-width: 1100px;
+    margin: 0 auto;
+}}
 </style>
 """
 
