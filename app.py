@@ -46,7 +46,7 @@ from theme import (
     PLOTLY_LAYOUT,
     BLUE1, BLUE2, PURPLE1, PURPLE2, YELLOW1, YELLOW2, SKYBLUE1, SKYBLUE2,
     RETAINED_COLOR, CHURNED_COLOR, CHART_PALETTE,
-    TEXT_MUTED, WHITE,
+    TEXT_MUTED, WHITE, BORDER_LIGHT, CARD_BG, BG_LIGHT,
 )
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ def run_analysis(summary_df, student_info_df, formula, selected_exam_types, sele
     except Exception as e:
         return {"error": f"TPI 수식 오류: {e}"}
 
-    # Also compute TPI on full data for cohort extraction (needs March+Aug)
+    # Also compute TPI on full data for cohort extraction (all months)
     full_summary_tpi = apply_tpi_formula(summary_df, formula)
 
     cohort_df, cohort_meta = extract_cohort(full_summary_tpi, student_info_df)
@@ -206,13 +206,26 @@ def run_analysis(summary_df, student_info_df, formula, selected_exam_types, sele
     if student_level.empty:
         return {"error": "학생 수준 데이터 생성 실패"}
 
-    # N/A handling: if exclude, drop students with any NaN in key 8월 metrics
+    # N/A handling: filter by required_conditions (cartesian product of exam types × months)
     if not include_na:
-        key_cols = [c for c in student_level.columns if c.endswith("_8월") or c.endswith("_3월")]
-        before = len(student_level)
-        student_level = student_level.dropna(subset=key_cols).copy()
-        excluded = before - len(student_level)
-        cohort_meta["na_excluded"] = excluded
+        required_conditions = [
+            (et, m) for et in selected_exam_types for m in selected_months
+        ]
+        if required_conditions:
+            valid_student_codes = {
+                code
+                for code, grp in cohort_df.groupby("학생코드_int")
+                if all(
+                    not grp[
+                        (grp["시험유형"] == et) & (grp["월"].astype(int) == int(m))
+                    ].empty
+                    for et, m in required_conditions
+                )
+            }
+            before = len(student_level)
+            student_level = student_level[student_level["학생코드"].isin(valid_student_codes)].copy()
+            excluded = before - len(student_level)
+            cohort_meta["na_excluded"] = excluded
         # Recompute meta counts
         cohort_meta["cohort_size"] = len(student_level)
         cohort_meta["retained_count"] = int((student_level["target_churn_sep"] == 0).sum())
@@ -414,32 +427,98 @@ with col_reset:
             del st.session_state[k]
         st.rerun()
 
-# ── Filter controls (dropdowns) ─────────────────────────────────────────────
-with st.container():
-    fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1])
-    with fc1:
-        all_exam_types = sorted(summary_df["시험유형"].dropna().unique().tolist())
+# ── Filter controls (styled container) ──────────────────────────────────────
+all_exam_types = sorted(summary_df["시험유형"].dropna().unique().tolist())
+all_month_opts = sorted(summary_df["월"].dropna().astype(int).unique().tolist())
+campus_opts = sorted(summary_df["캠퍼스"].dropna().unique().tolist()) if "캠퍼스" in summary_df.columns else []
+
+st.markdown('<div class="filter-container">', unsafe_allow_html=True)
+st.markdown('<div class="filter-header">🔍 분석 조건</div>', unsafe_allow_html=True)
+
+fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1])
+with fc1:
+    lc1, lc2 = st.columns([3, 1])
+    with lc1:
+        st.markdown('<div class="filter-label">📋 시험유형</div>', unsafe_allow_html=True)
+    with lc2:
+        _et_key = "filter_exam_type"
+        _et_toggle = st.checkbox("전체", value=True, key="et_all", label_visibility="visible")
+    if _et_toggle:
         selected_exam_types = st.multiselect(
-            "시험유형", options=all_exam_types, default=all_exam_types, key="filter_exam_type"
+            "시험유형", options=all_exam_types, default=all_exam_types,
+            key=_et_key, label_visibility="collapsed",
         )
-    with fc2:
-        month_opts = sorted(
-            summary_df.loc[summary_df["시험유형"].isin(selected_exam_types), "월"]
-            .dropna().astype(int).unique().tolist()
+    else:
+        selected_exam_types = st.multiselect(
+            "시험유형", options=all_exam_types, default=[],
+            key=_et_key, label_visibility="collapsed",
         )
-        selected_months = st.multiselect("월", options=month_opts, default=month_opts, key="filter_month")
-    with fc3:
-        if "캠퍼스" in summary_df.columns:
-            campus_opts = sorted(summary_df["캠퍼스"].dropna().unique().tolist())
-            selected_campuses = st.multiselect("캠퍼스", options=campus_opts, default=campus_opts, key="filter_campus")
+
+with fc2:
+    lc1, lc2 = st.columns([3, 1])
+    with lc1:
+        st.markdown('<div class="filter-label">📅 월</div>', unsafe_allow_html=True)
+    with lc2:
+        _m_toggle = st.checkbox("전체", value=True, key="m_all", label_visibility="visible")
+    month_opts = sorted(
+        summary_df.loc[summary_df["시험유형"].isin(selected_exam_types), "월"]
+        .dropna().astype(int).unique().tolist()
+    )
+    if _m_toggle:
+        selected_months = st.multiselect(
+            "월", options=month_opts, default=month_opts,
+            key="filter_month", label_visibility="collapsed",
+        )
+    else:
+        selected_months = st.multiselect(
+            "월", options=month_opts, default=[],
+            key="filter_month", label_visibility="collapsed",
+        )
+
+with fc3:
+    lc1, lc2 = st.columns([3, 1])
+    with lc1:
+        st.markdown('<div class="filter-label">🏫 캠퍼스</div>', unsafe_allow_html=True)
+    with lc2:
+        _c_toggle = st.checkbox("전체", value=True, key="c_all", label_visibility="visible")
+    if campus_opts:
+        if _c_toggle:
+            selected_campuses = st.multiselect(
+                "캠퍼스", options=campus_opts, default=campus_opts,
+                key="filter_campus", label_visibility="collapsed",
+            )
         else:
-            selected_campuses = []
-    with fc4:
-        selected_students = st.multiselect(
-            "학생코드 (선택)",
-            options=summary_df["학생코드"].dropna().astype(str).unique().tolist(),
-            default=[], key="filter_student",
-        )
+            selected_campuses = st.multiselect(
+                "캠퍼스", options=campus_opts, default=[],
+                key="filter_campus", label_visibility="collapsed",
+            )
+    else:
+        selected_campuses = []
+
+with fc4:
+    st.markdown('<div class="filter-label">👤 학생코드 (선택)</div>', unsafe_allow_html=True)
+    selected_students = st.multiselect(
+        "학생코드 (선택)",
+        options=summary_df["학생코드"].dropna().astype(str).unique().tolist(),
+        default=[], key="filter_student", label_visibility="collapsed",
+    )
+
+# ── Filter summary badge ──
+_parts = []
+if set(selected_exam_types) != set(all_exam_types):
+    _parts.append(" · ".join(selected_exam_types))
+if set(selected_months) != set(all_month_opts):
+    _parts.append(" · ".join(f"{m}월" for m in selected_months))
+else:
+    pass  # all months selected — omit
+if campus_opts and set(selected_campuses) != set(campus_opts):
+    _parts.append(f"캠퍼스 {len(selected_campuses)}개 선택")
+if selected_students:
+    _parts.append(f"학생 {len(selected_students)}명 지정")
+if _parts:
+    st.markdown(f'<div class="filter-summary">{" | ".join(_parts)}</div>', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 # Apply filters
 view_df = summary_df[
@@ -610,8 +689,8 @@ with tab4:
 
         # ── Banner ──
         st.markdown(
-            '<div class="info-box"><strong>2025년 3월 + 8월 재원 학생 코호트 기준, 9월 재원/퇴원 비교 분석</strong><br>'
-            '본 분석은 인과 증명이 아니라, 9월 퇴원과 함께 관찰되는 통계적 방향성 탐색을 목적으로 합니다.</div>',
+            '<div class="info-box"><strong>학생 CSV 전체 코호트 기준, is_enrolled 기반 재원/퇴원 비교 분석</strong><br>'
+            '본 분석은 인과 증명이 아니라, 퇴원과 함께 관찰되는 통계적 방향성 탐색을 목적으로 합니다.</div>',
             unsafe_allow_html=True,
         )
 

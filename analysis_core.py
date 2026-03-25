@@ -49,10 +49,8 @@ def extract_cohort(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Extract the analysis cohort:
-    1. Students enrolled in March 2025 GT2
-    2. Students enrolled in August 2025 GT2
-    3. Only students present in student CSV
-    4. Determine September churn status
+    - Cohort = ALL valid_codes from student_info CSV (no exam-record filter).
+    - Churn status is determined solely by is_enrolled column.
     Returns (cohort_df, meta_dict).
     """
     valid_codes = get_valid_student_codes(student_info)
@@ -68,58 +66,10 @@ def extract_cohort(
     if df_valid.empty:
         return pd.DataFrame(), {"error": "시험 데이터와 학생 CSV 간 일치하는 학생이 없습니다."}
 
-    # Build per-student enrollment status by month from student_info
-    # student_info has: student_code, enrollment_months, is_enrolled, etc.
-    # We need month-level presence. We use exam data to see which months students appeared.
-    # Cohort rule: present in March GT2 (exam_type in GT2 series), present in Aug GT2
-    # Since exam_type is MT/LT, GT2 = the overall exam system.
-    # "GT2 재원" means they are enrolled at that point. We check enrollment status from student data.
-    # However student_info only gives a single snapshot. Let's check if they have exam records in March and Aug.
+    # Cohort = entire valid_codes (no march/aug intersection)
+    cohort_codes = valid_codes
 
-    # Step 1: Find students who have exam records in year=2025, month=3
-    march_students = set(
-        df_valid.loc[
-            (df_valid["연도"].astype(int) == 2025) & (df_valid["월"].astype(int) == 3),
-            "학생코드_int",
-        ]
-        .dropna()
-        .unique()
-    )
-
-    # Step 2: Find students who have exam records in year=2025, month=8
-    aug_students = set(
-        df_valid.loc[
-            (df_valid["연도"].astype(int) == 2025) & (df_valid["월"].astype(int) == 8),
-            "학생코드_int",
-        ]
-        .dropna()
-        .unique()
-    )
-
-    # Cohort: students in both March and August 2025
-    cohort_codes = march_students & aug_students & valid_codes
-
-    if not cohort_codes:
-        return pd.DataFrame(), {
-            "error": "2025년 3월과 8월 모두 시험 기록이 있는 학생이 없습니다. 데이터를 확인하세요.",
-            "march_count": len(march_students),
-            "aug_count": len(aug_students),
-        }
-
-    # Step 3: Determine September status
-    # Check if student has exam records in Sep 2025 OR is_enrolled=1 in student_info
-    sep_students = set(
-        df_valid.loc[
-            (df_valid["연도"].astype(int) == 2025) & (df_valid["월"].astype(int) == 9),
-            "학생코드_int",
-        ]
-        .dropna()
-        .unique()
-    )
-
-    # Use student_info enrollment status as primary source for Sep status
-    # If student_info says is_enrolled=1, they are retained. If 0, they churned.
-    # But we also check: if they have Sep exam records, they are retained.
+    # Determine churn status solely from is_enrolled column
     enrolled_map = dict(
         zip(
             student_info["student_code"].astype(int),
@@ -129,23 +79,18 @@ def extract_cohort(
 
     cohort_records = []
     for code in cohort_codes:
-        # Get enrollment status from student_info
         is_enrolled = enrolled_map.get(int(code), None)
-        # Also check if they appear in Sep exams
-        in_sep = int(code) in sep_students
-
-        if is_enrolled == 1 or in_sep:
+        if is_enrolled == 1:
             churn = 0  # retained
         elif is_enrolled == 0:
             churn = 1  # churned
         else:
             # Cannot determine - skip
             continue
-
         cohort_records.append({"학생코드_int": int(code), "target_churn_sep": churn})
 
     if not cohort_records:
-        return pd.DataFrame(), {"error": "9월 상태를 판정할 수 있는 학생이 없습니다."}
+        return pd.DataFrame(), {"error": "is_enrolled 상태를 판정할 수 있는 학생이 없습니다."}
 
     cohort_status = pd.DataFrame(cohort_records)
 
@@ -167,8 +112,6 @@ def extract_cohort(
 
     meta = {
         "total_valid_students": len(valid_codes),
-        "march_students": len(march_students),
-        "aug_students": len(aug_students),
         "cohort_size": len(cohort_status),
         "retained_count": int((cohort_status["target_churn_sep"] == 0).sum()),
         "churned_count": int((cohort_status["target_churn_sep"] == 1).sum()),

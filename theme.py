@@ -368,6 +368,97 @@ button[data-baseweb="tab"] {{
     max-width: 1100px;
     margin: 0 auto;
 }}
+
+/* ── Filter container ────────────────────────────────────── */
+.filter-container {{
+    background: {CARD_BG};
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+    padding: 20px 28px;
+    border-top: 3px solid {BLUE1};
+    margin-bottom: 16px;
+}}
+.filter-header {{
+    font-size: 0.78rem;
+    color: {TEXT_MUTED};
+    font-weight: 700;
+    margin-bottom: 10px;
+    letter-spacing: 0.5px;
+}}
+.filter-label {{
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: {TEXT_DARK};
+    margin-bottom: 2px;
+}}
+.filter-summary {{
+    font-size: 0.8rem;
+    color: {TEXT_MUTED};
+    text-align: center;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid {BORDER_LIGHT};
+}}
+.filter-btn {{
+    font-size: 0.72rem;
+    color: {BLUE1};
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: 600;
+    border: none;
+    background: none;
+    padding: 0;
+}}
+.filter-btn:hover {{
+    text-decoration: underline;
+}}
+
+/* ── Multiselect tag (chip) override ─────────────────────── */
+[data-baseweb="tag"] {{
+    background-color: {BLUE1} !important;
+    border-radius: 20px !important;
+    padding: 2px 12px !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    color: white !important;
+    border: none !important;
+}}
+[data-baseweb="tag"] span {{
+    color: white !important;
+}}
+[data-baseweb="tag"] [role="presentation"] {{
+    color: rgba(255,255,255,0.7) !important;
+    font-size: 0.9rem !important;
+}}
+
+/* ── Dropdown popover ────────────────────────────────────── */
+[data-baseweb="popover"] {{
+    border-radius: 12px !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12) !important;
+    border: 1px solid {BORDER_LIGHT} !important;
+    overflow: hidden !important;
+}}
+[data-baseweb="menu"] li {{
+    font-size: 0.88rem !important;
+    padding: 10px 16px !important;
+    transition: background 0.15s !important;
+}}
+[data-baseweb="menu"] li:hover {{
+    background-color: #EFF6FF !important;
+    color: {BLUE1} !important;
+}}
+
+/* ── Select input box ────────────────────────────────────── */
+[data-baseweb="select"] > div:first-child {{
+    border-radius: 10px !important;
+    border: 1.5px solid {BORDER_LIGHT} !important;
+    background: white !important;
+    min-height: 44px !important;
+    transition: border-color 0.2s !important;
+}}
+[data-baseweb="select"] > div:first-child:hover {{
+    border-color: {BLUE1} !important;
+}}
 </style>
 """
 
