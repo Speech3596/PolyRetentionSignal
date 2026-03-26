@@ -101,13 +101,29 @@ def detect_file_kind(name: str, expected_ext: str | None = None) -> str:
         return "exam"
     if ext == ".csv" and any(marker in s for marker in student_markers):
         return "student"
+    # Fallback: accept any .xlsx as exam, any .csv as student
+    if ext == ".xlsx":
+        return "exam"
+    if ext == ".csv":
+        return "student"
     return "unknown"
 
 
 def parse_exam_filename(name: str) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    year_m = re.search(r"(20\d{2})년", name)
+    # Year: try "2025년" first, then bare "2025"
+    year_m = re.search(r"(20\d{2})년", name) or re.search(r"(20\d{2})", name)
+    # Month: try "3월" first, then month names, then contextual bare digits
     month_m = re.search(r"(\d{1,2})월", name)
-    exam_m = re.search(r"(?:^|[_\-\s])(MT|LT)(?:$|[_\-\s])", name, re.IGNORECASE)
+    if not month_m:
+        # Try English month names
+        for eng, num in [("jan", 1), ("feb", 2), ("mar", 3), ("apr", 4),
+                         ("may", 5), ("jun", 6), ("jul", 7), ("aug", 8),
+                         ("sep", 9), ("oct", 10), ("nov", 11), ("dec", 12)]:
+            if eng in name.lower():
+                month_m = type("M", (), {"group": lambda self, _=num: str(_)})()
+                break
+    # Exam type: MT or LT anywhere (bounded by non-alpha or start/end)
+    exam_m = re.search(r"(?:^|[^a-zA-Z])(MT|LT)(?:$|[^a-zA-Z])", name, re.IGNORECASE)
     year = int(year_m.group(1)) if year_m else None
     month = int(month_m.group(1)) if month_m else None
     exam_type = exam_m.group(1).upper() if exam_m else None
@@ -137,22 +153,35 @@ def read_single_exam(file_obj) -> pd.DataFrame:
         header = raw.iloc[2].tolist()
         df = raw.iloc[3:].copy()
         df.columns = header
-        df = df.rename(columns={
-            "교육과정": "curriculum",
-            "운영구분": "campus_type",
-            "캠퍼스": "campus",
-            "학급": "class_name",
-            "학번": "student_code",
-            "이름": "student_name",
-            "구분": "exam_type",
-            "Year": "year",
-            "Semester": "semester",
-            "Month": "month",
-            "시험과목": "subject",
-            "문항 순번": "item_no",
-            "문항정답": "correct_answer",
-            "학생선택": "student_answer",
-        })
+        # Build flexible rename map: strip whitespace from actual headers
+        df.columns = [str(c).strip() if pd.notna(c) else c for c in df.columns]
+        _EXAM_COL_ALIASES = {
+            "curriculum": ["교육과정", "curriculum"],
+            "campus_type": ["운영구분", "campus_type", "운영_구분"],
+            "campus": ["캠퍼스", "campus", "센터"],
+            "class_name": ["학급", "class_name", "class", "반"],
+            "student_code": ["학번", "student_code", "학생코드"],
+            "student_name": ["이름", "student_name", "학생명", "학생이름"],
+            "exam_type": ["구분", "exam_type", "시험구분", "시험유형"],
+            "year": ["Year", "year", "연도"],
+            "semester": ["Semester", "semester", "학기"],
+            "month": ["Month", "month", "월"],
+            "subject": ["시험과목", "subject", "과목"],
+            "item_no": ["문항 순번", "문항순번", "item_no", "문항번호"],
+            "correct_answer": ["문항정답", "correct_answer", "정답"],
+            "student_answer": ["학생선택", "student_answer", "학생답", "학생응답"],
+        }
+        _col_lower = {str(c).lower(): c for c in df.columns if pd.notna(c)}
+        _rename = {}
+        for internal, aliases in _EXAM_COL_ALIASES.items():
+            for alias in aliases:
+                if alias in df.columns:
+                    _rename[alias] = internal
+                    break
+                elif alias.lower() in _col_lower:
+                    _rename[_col_lower[alias.lower()]] = internal
+                    break
+        df = df.rename(columns=_rename)
         missing = [c for c in REQUIRED_EXAM_COLUMNS if c not in df.columns]
         if missing:
             raise ValueError(f"{fname} / {sheet} 필수 컬럼 누락: {missing}")
@@ -177,6 +206,38 @@ def read_single_exam(file_obj) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def _read_csv_auto_encoding(file_obj) -> pd.DataFrame:
+    """Read CSV with automatic encoding detection (utf-8 → utf-8-sig → cp949 → euc-kr)."""
+    raw_bytes = None
+    if hasattr(file_obj, "getvalue"):
+        raw_bytes = file_obj.getvalue()
+    elif hasattr(file_obj, "read"):
+        raw_bytes = file_obj.read()
+    else:
+        # file path string
+        with open(file_obj, "rb") as f:
+            raw_bytes = f.read()
+
+    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+        try:
+            return pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    # Last resort: ignore errors
+    return pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8", errors="replace")
+
+
+# Known column name mappings (header name → internal name)
+_STUDENT_COL_ALIASES = {
+    "master_campus_type": ["campus_type", "운영구분", "운영_구분", "type"],
+    "master_campus": ["campus_name", "campus", "캠퍼스", "센터"],
+    "student_code": ["student_code", "학번", "학생코드", "code", "student_id"],
+    "master_student_name": ["student_name", "이름", "학생명", "name", "학생이름"],
+    "enrollment_months": ["enrollment_months", "재원기간", "재원개월", "months", "tenure"],
+    "is_enrolled": ["is_enrolled_sept", "is_enrolled", "재원여부", "재원상태", "enrolled"],
+}
+
+
 def read_student_info(file_obj) -> pd.DataFrame:
     fname = getattr(file_obj, "name", None) or str(file_obj)
     if detect_file_kind(fname, expected_ext=".csv") != "student":
@@ -184,31 +245,49 @@ def read_student_info(file_obj) -> pd.DataFrame:
     # Reset file pointer in case it was previously read
     if hasattr(file_obj, "seek"):
         file_obj.seek(0)
-    df = pd.read_csv(file_obj)
+    df = _read_csv_auto_encoding(file_obj)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.dropna(axis=1, how="all")
     if df.shape[1] < 6:
         raise ValueError("학생 데이터 컬럼 수가 부족하다.")
 
-    right_second = df.columns[-2]
-    right_last = df.columns[-1]
-    rename_map = {
-        df.columns[0]: "master_campus_type",
-        df.columns[1]: "master_campus",
-        df.columns[2]: "student_code",
-        df.columns[3]: "master_student_name",
-        right_second: "enrollment_months",
-        right_last: "is_enrolled",
-    }
-    out = df.rename(columns=rename_map).copy()
-    out = out[[
-        "master_campus_type",
-        "master_campus",
-        "student_code",
-        "master_student_name",
-        "enrollment_months",
-        "is_enrolled",
-    ]]
+    # Try header-aware column matching first
+    col_lower = {c.lower(): c for c in df.columns}
+    rename_map = {}
+    matched = set()
+    for internal_name, aliases in _STUDENT_COL_ALIASES.items():
+        for alias in aliases:
+            if alias.lower() in col_lower:
+                orig_col = col_lower[alias.lower()]
+                if orig_col not in matched:
+                    rename_map[orig_col] = internal_name
+                    matched.add(orig_col)
+                    break
+
+    if len(rename_map) >= 4:
+        # Header-aware matching succeeded
+        out = df.rename(columns=rename_map).copy()
+    else:
+        # Fallback: positional mapping (legacy behavior)
+        right_second = df.columns[-2]
+        right_last = df.columns[-1]
+        rename_map = {
+            df.columns[0]: "master_campus_type",
+            df.columns[1]: "master_campus",
+            df.columns[2]: "student_code",
+            df.columns[3]: "master_student_name",
+            right_second: "enrollment_months",
+            right_last: "is_enrolled",
+        }
+        out = df.rename(columns=rename_map).copy()
+
+    required = ["master_campus_type", "master_campus", "student_code",
+                "master_student_name", "enrollment_months", "is_enrolled"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"학생 데이터 필수 컬럼 매핑 실패: {missing}")
+
+    out = out[required].copy()
     out["student_code"] = pd.to_numeric(out["student_code"], errors="coerce").astype("Int64")
     out["enrollment_months"] = pd.to_numeric(out["enrollment_months"], errors="coerce")
     out["is_enrolled"] = pd.to_numeric(out["is_enrolled"], errors="coerce").fillna(0).astype(int)
