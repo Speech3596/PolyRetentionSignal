@@ -124,8 +124,12 @@ def validate_uploads(exam_objs, student_obj):
     return valid_exams, student_obj, errors
 
 
-@st.cache_data(show_spinner=False)
 def load_all(exam_objs, student_obj):
+    """Load and process all uploaded files.
+    NOTE: @st.cache_data was removed because UploadedFile objects
+    cause slow/unreliable hashing and potential infinite rerun loops.
+    Results are stored in session_state instead.
+    """
     exam_frames = [read_single_exam(f) for f in exam_objs]
     raw = pd.concat(exam_frames, ignore_index=True) if exam_frames else pd.DataFrame()
     student_info = read_student_info(student_obj) if student_obj is not None else pd.DataFrame()
@@ -348,13 +352,15 @@ if not st.session_state.data_loaded:
             st.session_state.student_info_df = student_info_df
             st.session_state.data_loaded = True
             st.session_state.processing = False
-            del st.session_state._pending_exams
-            del st.session_state._pending_student
-            time.sleep(1.0)
+            # Clean up pending file references
+            st.session_state.pop("_pending_exams", None)
+            st.session_state.pop("_pending_student", None)
             st.rerun()
-        except Exception:
+        except Exception as exc:
             st.session_state.processing = False
-            safe_error("데이터 로딩 중 오류가 발생했습니다. 파일 형식을 확인해 주세요.")
+            st.session_state.pop("_pending_exams", None)
+            st.session_state.pop("_pending_student", None)
+            safe_error(f"데이터 로딩 중 오류가 발생했습니다. 파일 형식을 확인해 주세요.\n{exc}")
             st.stop()
 
     # ── Landing page ──

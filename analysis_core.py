@@ -202,12 +202,11 @@ def build_cohort_student_level(
                 rec[f"{m}_추세기울기"] = np.nan
                 continue
 
-            # Per-month values
+            # Per-month values (match any year present in data)
             month_vals = {}
             for mo in selected_months:
                 vals = grp.loc[
-                    (grp["연도"].astype(float).astype(int) == 2025)
-                    & (grp["월"].astype(float).astype(int) == mo),
+                    grp["월"].astype(float).astype(int) == mo,
                     m,
                 ].dropna()
                 val = vals.mean() if len(vals) > 0 else np.nan
@@ -757,13 +756,10 @@ def build_monthly_flow(
         selected_months = list(range(3, 9))
     selected_months = sorted(int(m) for m in selected_months)
 
-    # Filter to rows with valid 연도/월
+    # Filter to rows with valid 연도/월 (no year hardcoding — use all available years)
     valid_mask = cohort_df["연도"].notna() & cohort_df["월"].notna()
     df = cohort_df[valid_mask].copy()
-    df = df[
-        (df["연도"].astype(float).astype(int) == 2025)
-        & (df["월"].astype(float).astype(int).isin(selected_months))
-    ]
+    df = df[df["월"].astype(float).astype(int).isin(selected_months)]
 
     if df.empty:
         return pd.DataFrame()

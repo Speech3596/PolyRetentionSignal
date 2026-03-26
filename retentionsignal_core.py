@@ -125,6 +125,9 @@ def read_single_exam(file_obj) -> pd.DataFrame:
     if detect_file_kind(fname, expected_ext=".xlsx") != "exam":
         raise ValueError(f"시험 데이터 파일명이 아님: {Path(fname).name}")
 
+    # Reset file pointer in case it was previously read
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
     xls = pd.ExcelFile(_read_excel_bytes(file_obj))
     frames = []
     for sheet in xls.sheet_names:
@@ -178,6 +181,9 @@ def read_student_info(file_obj) -> pd.DataFrame:
     fname = getattr(file_obj, "name", None) or str(file_obj)
     if detect_file_kind(fname, expected_ext=".csv") != "student":
         raise ValueError(f"학생 데이터 파일명이 아님: {Path(fname).name}")
+    # Reset file pointer in case it was previously read
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
     df = pd.read_csv(file_obj)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.dropna(axis=1, how="all")
