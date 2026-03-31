@@ -24,12 +24,13 @@ MONTH_MAP = {
     "dec": 12, "december": 12, "12": 12, "12월": 12,
 }
 
-METRIC_ORDER = ["TPI", "P-Score", "T-Score", "B.CV", "CI", "CV", "C.CV"]
+METRIC_ORDER = ["TPI", "P-Score", "T-Score", "B.CV", "CI", "QR", "CV", "C.CV"]
 ALIAS_TO_COLUMN = {
     "P": "P-Score",
     "T": "T-Score",
     "BCV": "B.CV",
     "CI": "CI",
+    "QR": "QR",
     "CV": "CV",
     "CCV": "C.CV",
 }
@@ -368,17 +369,25 @@ def build_student_summary(raw: pd.DataFrame, student_info: Optional[pd.DataFrame
     exam_cv = score.groupby(grp_exam, dropna=False)["P-Score"].apply(inverse_cv_score).rename("CV").reset_index()
     score = score.merge(exam_cv, on=grp_exam, how="left")
     score["T-Score"] = score.groupby(grp_exam, dropna=False)["P-Score"].transform(tscore_from_series)
+    score["QR"] = score.groupby(grp_exam, dropna=False)["P-Score"].transform(percentile_rank)
 
     campus_grp = grp_exam + ["campus"]
     campus_cv = score.groupby(campus_grp, dropna=False)["P-Score"].apply(inverse_cv_score).rename("C.CV").reset_index()
     score = score.merge(campus_cv, on=campus_grp, how="left")
 
     # T-Subject: per-subject T-Score (e.g., T-Eng, T-S.B, T-Eng.F)
+    # Students who did NOT take a particular subject keep NaN (not 50)
     t_subject_cols = []
     for subj_col in subject_cols:
         if subj_col in score.columns:
             t_col = _make_t_subject_name(subj_col)
-            score[t_col] = score.groupby(grp_exam, dropna=False)[subj_col].transform(tscore_from_series)
+            # Compute T-Score only for non-NaN values; preserve NaN for missing subjects
+            has_value = score[subj_col].notna()
+            score[t_col] = np.nan
+            if has_value.any():
+                score.loc[has_value, t_col] = score.loc[has_value].groupby(
+                    grp_exam, dropna=False
+                )[subj_col].transform(tscore_from_series)
             t_subject_cols.append(t_col)
 
     item_exam = item.groupby(grp_exam, dropna=False).agg(exam_mean_rate=("문항 정답률", "mean")).reset_index()
@@ -429,9 +438,9 @@ def build_student_summary(raw: pd.DataFrame, student_info: Optional[pd.DataFrame
     ordered = ["캠퍼스", "학생명", "학생코드", "재원기간", "재원상태", "시험유형", "연도", "월", "P-Score"]
     subject_cols_sorted = sorted(subject_cols)
     t_subject_cols_sorted = sorted(t_subject_cols)
-    ordered += subject_cols_sorted + ["CV", "B.CV", "T-Score", "CI", "C.CV"] + t_subject_cols_sorted
+    ordered += subject_cols_sorted + ["CV", "B.CV", "T-Score", "CI", "QR", "C.CV"] + t_subject_cols_sorted
 
-    for c in ["P-Score", "CV", "B.CV", "T-Score", "CI", "C.CV"] + subject_cols_sorted + t_subject_cols_sorted:
+    for c in ["P-Score", "CV", "B.CV", "T-Score", "CI", "QR", "C.CV"] + subject_cols_sorted + t_subject_cols_sorted:
         if c in score.columns:
             score[c] = clip_0_100(score[c]).round(2)
 
@@ -491,17 +500,66 @@ def apply_tpi_formula(df: pd.DataFrame, formula: str) -> pd.DataFrame:
     aliases = {}
     for alias, col in ALIAS_TO_COLUMN.items():
         aliases[alias] = out[col].fillna(0).astype(float) if col in out.columns else pd.Series(np.zeros(len(out)), index=out.index)
-    # Add T-Subject aliases dynamically (e.g., "T-Eng" maps to column "T-Eng")
+
+    # T-Subject aliases: keep NaN tracking for redistribution
+    t_subj_alias_map = {}  # alias -> column name
     for col in get_t_subject_cols(out):
         alias_key = _col_to_formula_alias(col)
         aliases[alias_key] = out[col].fillna(0).astype(float)
+        t_subj_alias_map[alias_key] = col
+
     tree = ast.parse(formula, mode="eval")
+
+    # Parse weights from formula to enable T-Subject redistribution
+    t_subj_weights = _extract_t_subject_weights(formula, set(t_subj_alias_map.keys()))
+
     values = []
     for idx in out.index:
         vars_i = {k: float(v.loc[idx]) for k, v in aliases.items()}
+
+        # T-Subject redistribution: if some T-Subject cols are NaN for this row,
+        # redistribute their weight to present T-Subjects proportionally
+        if t_subj_weights:
+            present_aliases = []
+            missing_aliases = []
+            for ts_alias, ts_col in t_subj_alias_map.items():
+                if ts_alias in t_subj_weights:
+                    if pd.notna(out.at[idx, ts_col]):
+                        present_aliases.append(ts_alias)
+                    else:
+                        missing_aliases.append(ts_alias)
+
+            if missing_aliases and present_aliases:
+                # Redistribute missing weight to present T-Subjects
+                missing_total = sum(t_subj_weights[a] for a in missing_aliases)
+                present_total = sum(t_subj_weights[a] for a in present_aliases)
+                if present_total > 0:
+                    boost_factor = (present_total + missing_total) / present_total
+                    for a in present_aliases:
+                        vars_i[a] = vars_i[a] * boost_factor
+                # Zero out missing so they don't contribute
+                for a in missing_aliases:
+                    vars_i[a] = 0.0
+
         values.append(SafeFormulaEvaluator(vars_i).visit(tree))
+
     out["TPI"] = pd.Series(values, index=out.index).clip(lower=0, upper=100).round(2)
     return out
+
+
+def _extract_t_subject_weights(formula: str, t_subj_aliases: set) -> Dict[str, float]:
+    """Extract T-Subject weights from formula string like '(TSEng*2.0)'.
+    Returns {alias: weight} for T-Subject aliases found in the formula.
+    """
+    import re
+    weights = {}
+    for alias in t_subj_aliases:
+        # Match patterns like (TSEng*2.0) or TSEng*2.0
+        pattern = rf'{re.escape(alias)}\s*\*\s*([0-9.]+)'
+        m = re.search(pattern, formula)
+        if m:
+            weights[alias] = float(m.group(1))
+    return weights
 
 
 def make_default_formula(enabled_weights: Dict[str, float]) -> str:
@@ -536,6 +594,7 @@ def compute_default_tpi_weights(t_subject_cols: list) -> Dict[str, float]:
         "T": t_weight,
         "BCV": 30.0,
         "CI": 0.0,
+        "QR": 0.0,
         "CV": 0.0,
         "CCV": 0.0,
     }

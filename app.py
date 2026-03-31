@@ -726,11 +726,11 @@ with tab4:
         ew = st.session_state.enabled_weights_used
         _direction_map = {
             "P": "높을수록 좋음", "T": "높을수록 좋음", "BCV": "높을수록 좋음 (역방향 보정됨)",
-            "CI": "높을수록 좋음", "CCV": "높을수록 좋음 (역방향 보정됨)", "CV": "높을수록 좋음 (역방향 보정됨)",
+            "CI": "높을수록 좋음", "QR": "높을수록 좋음", "CCV": "높을수록 좋음 (역방향 보정됨)", "CV": "높을수록 좋음 (역방향 보정됨)",
         }
         _norm_map = {
             "P": "0~100 clip", "T": "Z-score→T-score 0~100", "BCV": "100 - raw_CV, 0~100 clip",
-            "CI": "난이도 가중 0~100", "CCV": "캠퍼스 내 100-rawCV", "CV": "100 - raw_CV 0~100",
+            "CI": "난이도 가중 0~100", "QR": "백분위 0~100", "CCV": "캠퍼스 내 100-rawCV", "CV": "100 - raw_CV 0~100",
         }
         _all_config_aliases = list(ALIAS_TO_COLUMN.keys())
         # Add T-Subject aliases
