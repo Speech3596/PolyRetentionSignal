@@ -24,18 +24,16 @@ MONTH_MAP = {
     "dec": 12, "december": 12, "12": 12, "12월": 12,
 }
 
-METRIC_ORDER = ["TPI", "P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]
+METRIC_ORDER = ["TPI", "P-Score", "T-Score", "B.CV", "CI", "CV", "C.CV"]
 ALIAS_TO_COLUMN = {
     "P": "P-Score",
     "T": "T-Score",
     "BCV": "B.CV",
     "CI": "CI",
-    "QR": "QR",
-    "CT": "C.T-Score",
-    "CCV": "C.CV",
-    "CQR": "C.QR",
     "CV": "CV",
+    "CCV": "C.CV",
 }
+# T-Subject aliases are dynamic and added at runtime (e.g., "T-Eng": "T-Eng")
 
 REQUIRED_EXAM_COLUMNS = [
     "curriculum", "campus_type", "campus", "class_name", "student_code", "student_name",
@@ -301,6 +299,56 @@ def build_item_stats(raw: pd.DataFrame) -> pd.DataFrame:
     return item
 
 
+_SUBJECT_ABBREV = {
+    "english": "Eng",
+    "speech building": "S.B",
+    "eng. foundations": "Eng.F",
+    "foundations": "Fnd",
+    "math": "Math",
+    "science": "Sci",
+    "social studies": "S.S",
+    "reading": "Rdg",
+    "writing": "Wrt",
+    "grammar": "Grm",
+    "vocabulary": "Voc",
+    "listening": "Lst",
+    "speaking": "Spk",
+}
+
+
+def _make_t_subject_name(subject: str) -> str:
+    """Create abbreviated T-Subject metric name, e.g., 'English' -> 'T-Eng'.
+    Column names may contain dots/spaces but formula aliases must be valid Python identifiers.
+    """
+    s = subject.strip()
+    key = s.lower()
+    if key in _SUBJECT_ABBREV:
+        return f"T-{_SUBJECT_ABBREV[key]}"
+    # Auto-abbreviate: take first letters of each word, max 5 chars
+    parts = s.replace(".", " ").split()
+    if len(parts) == 1:
+        abbr = s[:4]
+    else:
+        abbr = "".join(p[0].upper() for p in parts[:3])
+    return f"T-{abbr}"
+
+
+def get_t_subject_cols(df: pd.DataFrame) -> list:
+    """Return list of T-Subject column names present in the dataframe."""
+    return [c for c in df.columns if c.startswith("T-") and c != "T-Score"]
+
+
+def _col_to_formula_alias(col: str) -> str:
+    """Convert column name to a valid Python identifier for formula evaluation.
+    E.g., 'T-Eng' -> 'TSEng', 'T-S.B' -> 'TSSB', 'T-Eng.F' -> 'TSEngF'
+    """
+    import re as _re
+    # Replace non-alphanumeric with nothing, prefix 'TS' for T-Subject
+    clean = col.replace("T-", "TS")
+    clean = _re.sub(r'[^a-zA-Z0-9]', '', clean)
+    return clean
+
+
 def build_student_summary(raw: pd.DataFrame, student_info: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     grp_exam = ["exam_type", "year", "month_num"]
     grp_student = grp_exam + ["campus", "campus_type", "student_code", "student_name"]
@@ -320,13 +368,18 @@ def build_student_summary(raw: pd.DataFrame, student_info: Optional[pd.DataFrame
     exam_cv = score.groupby(grp_exam, dropna=False)["P-Score"].apply(inverse_cv_score).rename("CV").reset_index()
     score = score.merge(exam_cv, on=grp_exam, how="left")
     score["T-Score"] = score.groupby(grp_exam, dropna=False)["P-Score"].transform(tscore_from_series)
-    score["QR"] = score.groupby(grp_exam, dropna=False)["P-Score"].transform(percentile_rank)
 
     campus_grp = grp_exam + ["campus"]
     campus_cv = score.groupby(campus_grp, dropna=False)["P-Score"].apply(inverse_cv_score).rename("C.CV").reset_index()
     score = score.merge(campus_cv, on=campus_grp, how="left")
-    score["C.T-Score"] = score.groupby(campus_grp, dropna=False)["P-Score"].transform(tscore_from_series)
-    score["C.QR"] = score.groupby(campus_grp, dropna=False)["P-Score"].transform(percentile_rank)
+
+    # T-Subject: per-subject T-Score (e.g., T-Eng, T-S.B, T-Eng.F)
+    t_subject_cols = []
+    for subj_col in subject_cols:
+        if subj_col in score.columns:
+            t_col = _make_t_subject_name(subj_col)
+            score[t_col] = score.groupby(grp_exam, dropna=False)[subj_col].transform(tscore_from_series)
+            t_subject_cols.append(t_col)
 
     item_exam = item.groupby(grp_exam, dropna=False).agg(exam_mean_rate=("문항 정답률", "mean")).reset_index()
     student_item = raw.merge(item[grp_exam + ["subject", "item_no", "문항 정답률"]], on=grp_exam + ["subject", "item_no"], how="left")
@@ -375,9 +428,10 @@ def build_student_summary(raw: pd.DataFrame, student_info: Optional[pd.DataFrame
 
     ordered = ["캠퍼스", "학생명", "학생코드", "재원기간", "재원상태", "시험유형", "연도", "월", "P-Score"]
     subject_cols_sorted = sorted(subject_cols)
-    ordered += subject_cols_sorted + ["CV", "B.CV", "T-Score", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]
+    t_subject_cols_sorted = sorted(t_subject_cols)
+    ordered += subject_cols_sorted + ["CV", "B.CV", "T-Score", "CI", "C.CV"] + t_subject_cols_sorted
 
-    for c in ["P-Score", "CV", "B.CV", "T-Score", "CI", "QR", "C.T-Score", "C.CV", "C.QR"] + subject_cols_sorted:
+    for c in ["P-Score", "CV", "B.CV", "T-Score", "CI", "C.CV"] + subject_cols_sorted + t_subject_cols_sorted:
         if c in score.columns:
             score[c] = clip_0_100(score[c]).round(2)
 
@@ -437,6 +491,10 @@ def apply_tpi_formula(df: pd.DataFrame, formula: str) -> pd.DataFrame:
     aliases = {}
     for alias, col in ALIAS_TO_COLUMN.items():
         aliases[alias] = out[col].fillna(0).astype(float) if col in out.columns else pd.Series(np.zeros(len(out)), index=out.index)
+    # Add T-Subject aliases dynamically (e.g., "T-Eng" maps to column "T-Eng")
+    for col in get_t_subject_cols(out):
+        alias_key = _col_to_formula_alias(col)
+        aliases[alias_key] = out[col].fillna(0).astype(float)
     tree = ast.parse(formula, mode="eval")
     values = []
     for idx in out.index:
@@ -451,9 +509,42 @@ def make_default_formula(enabled_weights: Dict[str, float]) -> str:
     total = 0.0
     for alias, w in enabled_weights.items():
         if w and w > 0:
+            # T-Subject aliases use underscore in formulas (T_Eng, T_S.B)
             parts.append(f"({alias}*{w})")
             total += w
     return f"({' + '.join(parts)}) / {total}" if parts else "0"
+
+
+def compute_default_tpi_weights(t_subject_cols: list) -> Dict[str, float]:
+    """Compute default TPI weights based on available T-Subject metrics.
+    Default: T 40%, BCV 30%, T-subjects share 10% equally (split by count).
+    If 4 subjects: each T-subject = 2.5%, T adjusts to 30%.
+    Remaining metrics (P, CI, CV, CCV) default to 0 (unchecked).
+    """
+    n_subj = len(t_subject_cols)
+    if n_subj > 0:
+        t_subj_total = 10.0
+        t_subj_each = round(t_subj_total / n_subj, 2)
+        # If subjects present, T adjusts: T=40% - 10% = 30% (total T-family = 40%)
+        t_weight = 30.0
+    else:
+        t_weight = 40.0
+        t_subj_each = 0.0
+
+    weights = {
+        "P": 0.0,
+        "T": t_weight,
+        "BCV": 30.0,
+        "CI": 0.0,
+        "CV": 0.0,
+        "CCV": 0.0,
+    }
+    # Add T-Subject weights
+    for col in t_subject_cols:
+        alias = _col_to_formula_alias(col)
+        weights[alias] = t_subj_each
+
+    return weights
 
 
 def period_sort_key(label: str) -> Tuple[int, int]:
@@ -463,12 +554,19 @@ def period_sort_key(label: str) -> Tuple[int, int]:
     return (0 if m.group(1) == "MT" else 1, int(m.group(2)))
 
 
+def get_all_metrics(df: pd.DataFrame) -> list:
+    """Return METRIC_ORDER + any T-Subject columns found in df."""
+    t_subj = get_t_subject_cols(df)
+    return METRIC_ORDER + t_subj
+
+
 def build_tpi_matrix(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["캠퍼스", "학생명", "학생코드", "재원기간", "지표"])
     work = df.copy()
     work["기간"] = work["시험유형"].astype(str) + "-" + work["월"].astype(int).astype(str) + "월"
-    metrics_map = {m: m for m in METRIC_ORDER}
+    all_metrics = get_all_metrics(df)
+    metrics_map = {m: m for m in all_metrics}
     long_parts = []
     id_cols = ["캠퍼스", "학생명", "학생코드", "재원기간", "기간"]
     for metric_name, col in metrics_map.items():
@@ -479,7 +577,7 @@ def build_tpi_matrix(df: pd.DataFrame) -> pd.DataFrame:
     pivot = long_df.pivot_table(index=["캠퍼스", "학생명", "학생코드", "재원기간", "지표"], columns="기간", values="값", aggfunc="first").reset_index()
     period_cols = sorted([c for c in pivot.columns if c not in ["캠퍼스", "학생명", "학생코드", "재원기간", "지표"]], key=period_sort_key)
     pivot = pivot[["캠퍼스", "학생명", "학생코드", "재원기간", "지표"] + period_cols].copy()
-    metric_map = {m: i for i, m in enumerate(METRIC_ORDER)}
+    metric_map = {m: i for i, m in enumerate(all_metrics)}
     pivot["_metric_order"] = pivot["지표"].map(metric_map).fillna(999)
     pivot = pivot.sort_values(["학생명", "학생코드", "_metric_order"]).drop(columns=["_metric_order"]).reset_index(drop=True)
     for c in period_cols:

@@ -166,7 +166,11 @@ def build_cohort_student_level(
     first_month = min(selected_months)
     last_month = max(selected_months)
 
-    metric_cols = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR", "TPI"]
+    # Base metrics + dynamic T-Subject columns
+    metric_cols = ["P-Score", "T-Score", "B.CV", "CI", "CV", "C.CV", "TPI"]
+    # Add T-Subject columns dynamically
+    t_subj_cols = [c for c in cohort_df.columns if c.startswith("T-") and c != "T-Score"]
+    metric_cols = metric_cols + sorted(t_subj_cols)
     available_metrics = [c for c in metric_cols if c in cohort_df.columns]
 
     records = []
@@ -530,7 +534,7 @@ def run_all_multivariate_models(
     first_month: int = 3,
 ) -> List[Dict[str, Any]]:
     """Run all defined multivariate models using dynamic month references."""
-    base_names = ["P-Score", "T-Score", "B.CV", "CI", "QR", "C.T-Score", "C.CV", "C.QR"]
+    base_names = ["P-Score", "T-Score", "B.CV", "CI", "CV", "C.CV"]
     tpi_last = f"TPI_{last_month}월"
     metrics_last = [f"{m}_{last_month}월" for m in base_names]
     metrics_first = [f"{m}_{first_month}월" for m in base_names]
